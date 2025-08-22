@@ -60,6 +60,7 @@ EXPIRE_DURATION_MS = 30000
 # Cryptographic helpers
 # ---------------------------------------------------------------------------
 
+
 def _digest(body: bytes) -> bytes:
     """Return HMAC-SHA256 digest bytes for the given body using configured secret.
 
@@ -70,9 +71,11 @@ def _digest(body: bytes) -> bytes:
     return hmac.new(HMAC_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
 
 
+
 def _constant_time_equals(a: Optional[str], b: Optional[str]) -> bool:
     """Safely compare two strings in constant time; treat None as empty string."""
     return hmac.compare_digest((a or "").strip(), (b or "").strip())
+
 
 
 def _compute_signature(body: bytes) -> str:
@@ -88,6 +91,7 @@ def _compute_signature(body: bytes) -> str:
 # ---------------------------------------------------------------------------
 # Incoming signature extraction + verification helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_incoming_signature(req: func.HttpRequest) -> str:
     """Extract the HMAC signature provided by the caller.
@@ -123,6 +127,7 @@ def _extract_incoming_signature(req: func.HttpRequest) -> str:
 # Helpers used for OSDU handshake verification (challenge)
 # ---------------------------------------------------------------------------
 
+
 def _hex_to_bytes(s: Optional[str]) -> bytes:
     """Convert a hex-like string into bytes.
 
@@ -150,9 +155,11 @@ def _hex_to_bytes(s: Optional[str]) -> bytes:
     return val.encode("utf-8")
 
 
+
 def _hmac_sha256_bytes(data: bytes, key: bytes) -> bytes:
     """HMAC-SHA256 producing raw bytes (convenience wrapper)."""
     return hmac.new(key, data, hashlib.sha256).digest()
+
 
 
 def _compute_signature_chain(secret_hex: str, nonce_hex: str, timestamp_str: str, data_str: str) -> bytes:
@@ -175,6 +182,7 @@ def _compute_signature_chain(secret_hex: str, nonce_hex: str, timestamp_str: str
     return _hmac_sha256_bytes(data_str.encode("utf-8"), signed_key)
 
 
+
 def _get_signed_signature(url: str, secret_hex: str, expire_ms_str: str, nonce_hex: str) -> str:
     """Given handshake payload components, reproduce the expected signature (hex string).
 
@@ -194,6 +202,7 @@ def _get_signed_signature(url: str, secret_hex: str, expire_ms_str: str, nonce_h
     data = f'{{"expireMillisecond": "{expire_ms_str}","hashMechanism": "hmacSHA256","endpointUrl": "{url}","nonce": "{nonce_hex}"}}'
     sig_bytes = _compute_signature_chain(secret_hex, nonce_hex, timestamp, data)
     return sig_bytes.hex()
+
 
 
 def _verify_token_signature(hmac_token: str, secret_hex: str) -> None:
@@ -234,6 +243,7 @@ def _verify_token_signature(hmac_token: str, secret_hex: str) -> None:
 # Challenge response hash
 # ---------------------------------------------------------------------------
 
+
 def _get_response_hash(input_str: str) -> str:
     """Compute a SHA-256 over input_str and return encoded hash according to
     CHALLENGE_HASH_ENCODING.
@@ -254,9 +264,11 @@ def _get_response_hash(input_str: str) -> str:
 # Misc helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_valid_hex_like_secret(s: Optional[str]) -> bool:
     """Simple check: non-empty alphanumeric (hex-like), even length."""
     return bool(s) and bool(re.fullmatch(r"[A-Za-z0-9]+", s)) and len(s) % 2 == 0
+
 
 
 def _forward_to_event_grid(body: bytes) -> requests.Response:
@@ -273,13 +285,16 @@ def _forward_to_event_grid(body: bytes) -> requests.Response:
 # Schema detection & translation: Event Grid vs OSDU DataNotification
 # ---------------------------------------------------------------------------
 
+
 def _is_eventgrid_event(obj: Dict[str, Any]) -> bool:
     required_keys = {"id", "eventType", "eventTime", "subject", "data", "dataVersion"}
     return isinstance(obj, dict) and required_keys.issubset(obj.keys())
 
 
+
 def _is_eventgrid_batch(payload: Any) -> bool:
     return isinstance(payload, list) and all(isinstance(it, dict) and _is_eventgrid_event(it) for it in payload)
+
 
 
 def _is_osdu_data_notification_item(obj: Dict[str, Any]) -> bool:
@@ -287,8 +302,10 @@ def _is_osdu_data_notification_item(obj: Dict[str, Any]) -> bool:
     return isinstance(obj, dict) and {"id", "kind", "op"}.issubset(obj.keys())
 
 
+
 def _is_osdu_data_notification(payload: Any) -> bool:
     return isinstance(payload, list) and len(payload) > 0 and all(_is_osdu_data_notification_item(it) for it in payload)
+
 
 
 def _event_type_for_op(op: str) -> str:
@@ -301,6 +318,7 @@ def _event_type_for_op(op: str) -> str:
         if op_l == "delete":
             return EVENT_TYPE_BY_OP_DELETE
     return EVENT_TYPE_SINGLE
+
 
 
 def _translate_osdu_to_eventgrid(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -339,6 +357,7 @@ def _translate_osdu_to_eventgrid(items: List[Dict[str, Any]]) -> List[Dict[str, 
 # Azure Function entry point
 # ---------------------------------------------------------------------------
 
+
 def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exercised by integration tests
     """Main Azure Function handler.
 
@@ -346,9 +365,33 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
     - GET: minimal readiness response; if 'crc' and 'hmac' query params are present,
       attempt OSDU-style challenge verification and return a JSON responseHash.
     - POST: verify incoming HMAC signature (header or query); optionally translate
-      OSDU DataNotification list into Event Grid schema; forward to Event Grid.
+      OSDU DataNotification items into Event Grid events; forward them to Event Grid.
     """
     try:
+        # Log incoming request details for debugging (method, url, headers, params, body)
+        try:
+            raw_body = req.get_body() or b""
+            try:
+                body_text = raw_body.decode("utf-8")
+            except Exception:
+                # Fallback to replace so logging never fails on binary content
+                body_text = raw_body.decode("utf-8", errors="replace")
+        except Exception as ex:
+            raw_body = b""
+            body_text = f"<<unreadable body: {ex}>>"
+
+        headers_dict = dict(req.headers) if hasattr(req, "headers") else {}
+        params_dict = dict(req.params) if hasattr(req, "params") else {}
+        request_url = getattr(req, "url", "")
+
+        logging.info("Incoming HTTP request:")
+        logging.info(f"    Method: {req.method}")
+        logging.info(f"    URL: {request_url}")
+        logging.info(f"    Headers: {headers_dict}")
+        logging.info(f"    Query Params: {params_dict}")
+        # Limit body logged length to prevent extremely large logs
+        logging.info(f"    Body (first 20k chars): {body_text[:20000]}")
+
         # --------------------
         # GET: readiness / handshake
         # --------------------

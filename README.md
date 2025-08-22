@@ -1,4 +1,4 @@
-# OSDU Relay for Azure Event Grid
+# OSDU Notification Relay for Azure Event Grid
 
 This repository contains a small Azure Functions-based relay that accepts OSDU notification callbacks, validates HMAC signatures (including the OSDU handshake/challenge), optionally translates OSDU DataNotification payloads into Azure Event Grid events, and forwards events to an Event Grid topic.
 
@@ -138,4 +138,7 @@ Ideas and fixes welcome. For production hardening, consider adding additional te
 
 License
 -------
-This repository contains code intended as an example/shim. Add an appropriate license if you plan to publish or share it.
+This repository is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+Copyright (c) 2025 Eirik Haughom
+

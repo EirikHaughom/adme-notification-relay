@@ -1,0 +1,22 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "HMAC_SECRET": "",
+    "HMAC_HEADER": "Authorization",
+    "HMAC_ALGO": "sha256",
+    "SIGNATURE_FORMAT": "hex",
+    "SIGNATURE_PREFIX": "hmac ",
+    "CHALLENGE_HMAC_REQUIRED": "true",
+    "CHALLENGE_HASH_ENCODING": "base64-hex",
+    "EVENT_GRID_ENDPOINT": "https://<instance>.<region>-1.eventgrid.azure.net/api/events",
+    "EVENT_GRID_KEY": "",
+    "EVENT_TYPE_MODE": "single",
+    "EVENT_TYPE_SINGLE": "osdu.record.changed",
+    "EVENT_TYPE_BY_OP_CREATE": "osdu.record.create",
+    "EVENT_TYPE_BY_OP_UPDATE": "osdu.record.update",
+    "EVENT_TYPE_BY_OP_DELETE": "osdu.record.delete"
+  },
+  "ConnectionStrings": {}
+}
