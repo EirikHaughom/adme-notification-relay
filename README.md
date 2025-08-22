@@ -3,14 +3,16 @@
 This repository contains a small Azure Functions-based relay that accepts OSDU notification callbacks, validates HMAC signatures (including the OSDU handshake/challenge), optionally translates OSDU DataNotification payloads into Azure Event Grid events, and forwards events to an Event Grid topic.
 
 Key files
+
 - `OSDURelay/` — Azure Function implementation (`__init__.py`, `function.json`). Route: `/api/osdu-relay`.
 - `local.settings.json` — local development environment variables (not for production).
 - `requirements.txt` — Python dependencies.
 - `tests/` — convenience scripts used to exercise GET/POST behavior (`test-get.py`, `test-post.py`, `osdu-body.json`, `event.json`).
 
-Overview
---------
+## Overview
+
 The function performs the following responsibilities:
+
 - Verify incoming HMAC signatures from headers or query string.
 - Handle OSDU 'challenge' handshake (GET with `crc` and `hmac`) and emit the expected response hash.
 - Detect whether an incoming POST payload is already Event Grid schema or an OSDU DataNotification list.
@@ -18,133 +20,256 @@ The function performs the following responsibilities:
   - If Event Grid schema already, forward as-is.
 - Forward the (translated) payload to the configured Event Grid endpoint using the provided SAS key.
 
-Configuration (environment variables)
--------------------------------------
-The function is controlled by environment variables (set in `local.settings.json` for local dev). Important variables:
+## Azure prerequisites (resources)
 
-- `EVENT_GRID_ENDPOINT` (required) — Event Grid topic endpoint (e.g. https://<my-topic>.<region>.eventgrid.azure.net/api/events)
-- `EVENT_GRID_KEY` (required) — SAS key for your Event Grid topic
-- `HMAC_SECRET` — secret used to validate HMAC signatures (UTF-8 by default; for OSDU challenge chaining a hex-like secret is expected)
-- `KEY_VAULT_SECRET_URI` — (optional) full secret URI on Azure Key Vault. Example: `https://<your-vault>.vault.azure.net/secrets/<secret-name>`; when provided the function will attempt to fetch the HMAC secret from Key Vault using DefaultAzureCredential (managed identity when running in Azure).
-- `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME` — alternate form: provide the vault URL (e.g. `https://<your-vault>.vault.azure.net`) and the secret name separately if you prefer not to provide the full URI.
-- `HMAC_HEADER` — header to read signature from (default `Authorization`)
-- `HMAC_ALGO` — signature algorithm (currently only `sha256` supported)
-- `SIGNATURE_FORMAT` — `hex` (default) or `base64` used for incoming/outgoing signature format
-- `SIGNATURE_PREFIX` — prefix to strip from header value (defaults to `hmac `)
-- `CHALLENGE_HMAC_REQUIRED` — `true|false` whether the GET challenge must be validated against `HMAC_SECRET`
-- `CHALLENGE_HASH_ENCODING` — how challenge responseHash is encoded (e.g., `base64-hex`, `base64-raw`, `hex`)
-- `EVENT_TYPE_MODE` — `single` or `by_op` (controls whether eventType is same for all records or mapped by create/update/delete)
-- `EVENT_TYPE_SINGLE`, `EVENT_TYPE_BY_OP_CREATE`, `EVENT_TYPE_BY_OP_UPDATE`, `EVENT_TYPE_BY_OP_DELETE` — values used to populate Event Grid eventType
+You’ll need the following Azure resources in place (names are examples):
+
+- Resource Group (RG)
+- Storage Account (Functions state)
+- Function App (Python)
+- Key Vault (to store HMAC secret, optional but recommended)
+- Event Grid destination
+  - Either a Basic Topic or Domain
+  - Or an Event Grid Namespace with a Namespace Topic
+
+Example Azure CLI for creating Key Vault and Event Grid resources:
+
+```powershell
+# Variables
+$RG = "RG_NAME"
+$LOC = "LOCATION"
+$KV = "KV_NAME"
+$FUNC = "FUNC_NAME"
+$EGTopic = "EG_TOPIC_NAME"              # For Basic
+$EGNamespace = "EG_NAMESPACE_NAME"      # For Namespace
+$EGNsTopic = "EG_NAMESPACE_TOPIC_NAME"  # For Namespace
+
+# Create Key Vault
+az keyvault create --name $KV --resource-group $RG --location $LOC | Out-Null
+# Optional: store HMAC secret in the vault
+az keyvault secret set --vault-name $KV --name "HmacSecret" --value "REPLACE_WITH_SECRET" | Out-Null
+
+# Create Event Grid Basic Topic (choose one path)
+az eventgrid topic create --name $EGTopic --resource-group $RG --location $LOC | Out-Null
+
+# Or: Create Event Grid Namespace + Namespace Topic
+az eventgrid namespace create --name $EGNamespace --resource-group $RG --location $LOC | Out-Null
+az eventgrid namespace topic create --namespace-name $EGNamespace --name $EGNsTopic --resource-group $RG | Out-Null
+```
+
+## Configuration (environment variables)
+
+Set these in `local.settings.json` for local dev or as App Settings in Azure. “Required?” values are Yes, No, or Conditional.
+
+| Variable | Required? | Default | Description |
+| --- | --- | --- | --- |
+| `EVENT_GRID_ENDPOINT` | Yes | — | Event Grid endpoint. Basic topics/domains: full URL like `https://TOPIC.REGION.eventgrid.azure.net/api/events`. Namespaces: the endpoint host (or URL) like `NAMESPACE.REGION.eventgrid.azure.net`. |
+| `EVENT_GRID_AUTH` | No | `managed` | Auth mode for publishing: `managed` (Managed Identity/AAD via DefaultAzureCredential) or `key` (access key header). |
+| `EVENT_GRID_KEY` | Conditional | — | Required only when `EVENT_GRID_AUTH=key`. Event Grid access key used for the `aeg-sas-key` header. |
+| `EVENT_GRID_NAMESPACE_TOPIC` | Conditional | — | Required when publishing to an Event Grid Namespace (the Namespace Topic name). Not used for Basic topics/domains. |
+| `EVENT_GRID_CLOUD_SOURCE` | No | `/osdu/relay` | Default CloudEvent `source` when converting to CloudEvents for Namespace publishing. |
+| `HMAC_SECRET` | Conditional | — | Secret used to validate HMAC signatures. Provide if Key Vault is not configured. For OSDU challenge chaining, a hex-like secret is expected. |
+| `KEY_VAULT_SECRET_URI` | Conditional | — | Full Key Vault secret URI (e.g., `https://<vault>.vault.azure.net/secrets/<name>[/<version>]`). Provide this or the `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME` pair to fetch the HMAC secret via Managed Identity. |
+| `KEY_VAULT_URL` | Conditional | — | Vault URL (e.g., `https://<vault>.vault.azure.net`). Use together with `KEY_VAULT_SECRET_NAME` instead of `KEY_VAULT_SECRET_URI`. |
+| `KEY_VAULT_SECRET_NAME` | Conditional | — | Secret name in Key Vault. Use together with `KEY_VAULT_URL`. |
+| `HMAC_HEADER` | No | `Authorization` | Header to read the signature from. |
+| `HMAC_ALGO` | No | `sha256` | Signature algorithm. Only `sha256` is supported. |
+| `SIGNATURE_FORMAT` | No | `hex` | Outgoing/expected signature encoding: `hex` or `base64`. |
+| `SIGNATURE_PREFIX` | No | `hmac` | Prefix stripped from incoming header value (case-insensitive). Default is "hmac " (with a trailing space). |
+| `CHALLENGE_HMAC_REQUIRED` | No | `true` | Whether GET challenge verification must validate the `hmac` token. |
+| `CHALLENGE_HASH_ENCODING` | No | `base64-hex` | Encoding for the challenge `responseHash`: `base64-raw`, `base64-hex`, or `hex`. |
+| `EVENT_TYPE_MODE` | No | `single` | Event type strategy for translated OSDU items: `single` or `by_op`. |
+| `EVENT_TYPE_SINGLE` | No | `osdu.record.changed` | Event type used when `EVENT_TYPE_MODE=single`. |
+| `EVENT_TYPE_BY_OP_CREATE` | No | `osdu.record.create` | Event type for create operations when `EVENT_TYPE_MODE=by_op`. |
+| `EVENT_TYPE_BY_OP_UPDATE` | No | `osdu.record.update` | Event type for update operations when `EVENT_TYPE_MODE=by_op`. |
+| `EVENT_TYPE_BY_OP_DELETE` | No | `osdu.record.delete` | Event type for delete operations when `EVENT_TYPE_MODE=by_op`. |
+
+Notes on “Conditional”:
+
+- `EVENT_GRID_KEY` is required only in key auth mode (`EVENT_GRID_AUTH=key`).
+- `EVENT_GRID_NAMESPACE_TOPIC` is required only when targeting Event Grid Namespace.
+- One of `HMAC_SECRET` or the Key Vault settings (`KEY_VAULT_SECRET_URI` OR `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME`) must be configured so the function can validate signatures.
 
 Security note: Never commit real secrets (e.g., `EVENT_GRID_KEY` or `HMAC_SECRET`) to source control. Use Azure Key Vault / managed identities in production.
 
-Local development
------------------
+## Local development
+
 Prereqs:
+
 - Python 3.10+ (3.12 tested in this workspace)
 - Azure Functions Core Tools v4 (for local host emulation)
 - Azure CLI (optional, for deployment)
 
 Windows PowerShell quick start (from repository root):
 
-1) Create and activate a virtual environment and install dependencies:
+1. Create and activate a virtual environment and install dependencies:
 
-   python -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install -r requirements.txt
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
-2) Ensure `local.settings.json` contains the required values mentioned above. Example values are already present in the repo for local testing, but replace placeholders with your own values when necessary.
+1. Ensure `local.settings.json` contains the required values mentioned above. Example values are already present in the repo for local testing, but replace placeholders with your own values when necessary.
 
-3) Run the function locally:
+1. Run the function locally:
 
-   func host start
+```powershell
+func host start
+```
 
    (You can also use the VS Code task `func: host start` as configured in this workspace.)
 
-Testing the function
---------------------
+## Testing the function
+
 - To POST a sample OSDU DataNotification payload and automatically compute the HMAC header, run:
 
-  python tests/test-post.py
+```powershell
+python tests/test-post.py
+```
 
   The script computes the required `Authorization: hmac <hex>` header using `HMAC_SECRET` env var (or `testSecret` fallback) and posts the `tests/osdu-body.json` to the local function at `http://localhost:7071/api/osdu-relay`.
 
 - To test GET / handshake / readiness:
 
-  python tests/test-get.py             # ping (no challenge) by default
-  python tests/test-get.py --challenge # performs the OSDU handshake using the configured secret (requires `HMAC_SECRET`)
+```powershell
+python tests/test-get.py             # ping (no challenge) by default
+python tests/test-get.py --challenge # performs the OSDU handshake using the configured secret (requires HMAC_SECRET)
+```
 
 - You can also use curl/Invoke-WebRequest. Example (POSIX/cURL style):
 
-  curl -X POST "http://localhost:7071/api/osdu-relay" -H "Content-Type: application/json" -H "Authorization: hmac <signature>" --data @tests/osdu-body.json
+```bash
+curl -X POST "http://localhost:7071/api/osdu-relay" \
+   -H "Content-Type: application/json" \
+   -H "Authorization: hmac [signature]" \
+   --data @tests/osdu-body.json
+```
 
   Note: on Windows PowerShell the `curl` alias maps to Invoke-WebRequest; prefer the provided Python test scripts to compute the correct signature.
 
-How the function decides translation
------------------------------------
+## How the function decides translation
+
 - Incoming JSON that is a list will be inspected:
   - If it *already* matches Event Grid event schema (objects with keys `id`, `eventType`, `eventTime`, `subject`, `data`, `dataVersion`), it is forwarded unchanged.
   - If it looks like an OSDU DataNotification list (items having `id`, `kind`, `op`), the function translates each item into an Event Grid event object and forwards the resulting list.
   - Otherwise the body is forwarded as-is.
 
-Forwarding / Dry-run
---------------------
+## Forwarding / Auth
+
+- Managed Identity: Enable system-assigned or user-assigned identity on the Function App and assign RBAC role "Event Grid Data Sender" to the target topic/domain/namespace topic. Set `EVENT_GRID_AUTH=managed`. No key is required.
+- Key auth: Set `EVENT_GRID_AUTH=key` and provide `EVENT_GRID_KEY` to use the legacy `aeg-sas-key` header.
+
+## Troubleshooting / Dry-run
+
 - Use query parameter `?dryRun=1` (or `true`) on a POST to return the translated payload without forwarding to Event Grid.
 
-Deploying to Azure
-------------------
+## Deploying to Azure
+
 A simple example using Azure CLI + Functions Core Tools:
 
-1) Login and set subscription:
+1. Login and set subscription:
 
-   az login
-   az account set --subscription <YOUR_SUBSCRIPTION_ID>
+    ```powershell
+    az login
+    az account set --subscription YOUR_SUBSCRIPTION_ID
+    ```
 
-2) Create a resource group and storage account (example):
+1. Create a resource group and storage account (example):
 
-   az group create --name <RG> --location <LOCATION>
-   az storage account create --name <STORAGE_NAME> --resource-group <RG> --location <LOCATION> --sku Standard_LRS
+    ```powershell
+    az group create --name RG_NAME --location LOCATION
+    az storage account create --name STORAGE_NAME --resource-group RG_NAME --location LOCATION --sku Standard_LRS
+    ```
 
-3) Create Function App for Python (Consumption plan example):
+1. Create Function App for Python (Consumption plan example):
 
-   az functionapp create --resource-group <RG> --consumption-plan-location <LOCATION> --name <FUNCTION_APP_NAME> --storage-account <STORAGE_NAME> --location <LOCATION> --runtime python --runtime-version 3.10 --functions-version 4
+    ```powershell
+    az functionapp create --resource-group RG_NAME --consumption-plan-location LOCATION --name FUNCTION_APP_NAME --storage-account STORAGE_NAME --location LOCATION --runtime python --runtime-version 3.10 --functions-version 4
+    ```
 
-4) Set application settings (replace placeholders):
+1. Set application settings (replace placeholders):
 
-   az functionapp config appsettings set --name <FUNCTION_APP_NAME> --resource-group <RG> --settings \
-       HMAC_SECRET="<your-secret>" \
-       EVENT_GRID_ENDPOINT="https://<your-eventgrid-host>/api/events" \
-       EVENT_GRID_KEY="<your-event-grid-key>" \
-       HMAC_HEADER="Authorization" \
-       SIGNATURE_FORMAT="hex"
+    ```powershell
+    az functionapp config appsettings set `
+       --name FUNCTION_APP_NAME `
+       --resource-group RG_NAME `
+       --settings `
+      KEY_VAULT_URL="https://KV_NAME.vault.azure.net" `
+      KEY_VAULT_SECRET_NAME="HmacSecret" `
+       EVENT_GRID_ENDPOINT="https://TOPIC_NAME.REGION.eventgrid.azure.net/api/events" `
+       EVENT_GRID_KEY="YOUR_EVENTGRID_ACCESS_KEY"
+    ```
 
-   Add any additional settings from the configuration list above as needed.
+   If you're not using Key Vault, set `HMAC_SECRET="YOUR_SECRET"` instead of the `KEY_VAULT_*` settings. Add any additional settings from the configuration list above as needed.
 
-5) Deploy code (from repo root):
+1. Assign Managed Identity roles (Key Vault + Event Grid)
 
-   func azure functionapp publish <FUNCTION_APP_NAME> --python
+    If using Managed Identity (recommended):
 
-Security and production notes
------------------------------
+    ```powershell
+    # Ensure the Function App has a system-assigned managed identity
+    az functionapp identity assign --name $FUNC --resource-group $RG | Out-Null
+    
+    # Get the identity principalId
+    $principalId = az functionapp identity show --name $FUNC --resource-group $RG --query principalId -o tsv
+    
+    # Key Vault access: use either RBAC (recommended) or Access Policy
+    
+    # RBAC: assign data-plane role 'Key Vault Secrets User' at the Key Vault scope
+    $kvId = az keyvault show --name $KV --resource-group $RG --query id -o tsv
+    az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal `
+       --role "Key Vault Secrets User" --scope $kvId | Out-Null
+    
+    # (Alternative) Access policy model: grant secret get (and list if desired)
+    # az keyvault set-policy -n $KV --object-id $principalId --secret-permissions get list
+    
+    # Event Grid permission: assign 'Event Grid Data Sender'
+    # For Basic Topic
+    $egTopicId = az eventgrid topic show --name $EGTopic --resource-group $RG --query id -o tsv
+    az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal `
+       --role "Event Grid Data Sender" --scope $egTopicId | Out-Null
+    
+    # For Namespace Topic (if using Namespace)
+    $egNsTopicId = az eventgrid namespace topic show --namespace-name $EGNamespace --name $EGNsTopic `
+       --resource-group $RG --query id -o tsv
+    az role assignment create --assignee-object-id $principalId --assignee-principal-type ServicePrincipal `
+       --role "Event Grid Data Sender" --scope $egNsTopicId | Out-Null
+    ```
+
+1. Configure app settings for Managed Identity
+
+    - Set `EVENT_GRID_AUTH=managed`.
+    - If using Namespace: set `EVENT_GRID_NAMESPACE_TOPIC` and use the Namespace endpoint as `EVENT_GRID_ENDPOINT`.
+    - If using Key Vault: set `KEY_VAULT_SECRET_URI` or `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME`.
+
+1. Deploy code (from repo root):
+
+    ```powershell
+    func azure functionapp publish FUNCTION_APP_NAME --python
+    ```
+
+## Security and production notes
+
 - Do not put secrets in `local.settings.json` or in Git. Use Azure Key Vault and reference secrets via App Service/Function App settings or use Managed Identity.
 - Consider restricting Event Grid topic access with appropriate RBAC or private endpoints.
 - Enable Application Insights and review logs (host.json already contains a minimal Application Insights sampling config).
 
-Troubleshooting
----------------
+## Troubleshooting
+
 - If signature checks fail, confirm the HMAC computed by the client uses the same bytes (UTF-8) as the server.
 - The OSDU challenge flow expects a chained HMAC construction when using a hex-like secret; see `tests/test-get.py` for an example implementation of the chain.
 - Use `?dryRun=1` to see the payload that would be sent to Event Grid.
 
-Contributing
-------------
+## Contributing
+
 Ideas and fixes welcome. For production hardening, consider adding additional tests, monitoring, and better secrets management.
 
 Key Vault + Managed Identity
+
 - In production, enable the Function App's Managed Identity (system-assigned or a user-assigned identity) and grant it access to the Key Vault secret. You can either use Key Vault access policies (Secret GET) or Azure RBAC for Key Vault (e.g., "Key Vault Secrets User").
 - When running in Azure, DefaultAzureCredential will automatically use the managed identity to authenticate and retrieve the secret from Key Vault.
 
-License
--------
+## License
+
 This repository is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
-
-Copyright (c) 2025 Eirik Haughom
-

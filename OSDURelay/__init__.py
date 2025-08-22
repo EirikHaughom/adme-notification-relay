@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import azure.functions as func
 from azure.identity import DefaultAzureCredential
+from azure.eventgrid import EventGridPublisherClient
 from azure.keyvault.secrets import SecretClient
 from urllib.parse import urlparse
 import requests
@@ -52,9 +53,14 @@ CHALLENGE_HMAC_REQUIRED = os.environ.get("CHALLENGE_HMAC_REQUIRED", "true").lowe
 # - hex: hex string of SHA-256
 CHALLENGE_HASH_ENCODING = os.environ.get("CHALLENGE_HASH_ENCODING", "base64-hex").lower()
 
-# Event Grid configuration (required)
+# Event Grid configuration
+# EVENT_GRID_ENDPOINT is required. Authentication can be via:
+#  - Managed Identity / AAD (DefaultAzureCredential). Set EVENT_GRID_AUTH to "managed" (default) and grant Data Sender role.
+#  - Access Key. Set EVENT_GRID_AUTH to "key" and provide EVENT_GRID_KEY.
 EVENT_GRID_ENDPOINT = os.environ["EVENT_GRID_ENDPOINT"]
-EVENT_GRID_KEY = os.environ["EVENT_GRID_KEY"]
+EVENT_GRID_AUTH = os.environ.get("EVENT_GRID_AUTH", "managed").lower()  # managed | key
+EVENT_GRID_NAMESPACE_TOPIC = os.environ.get("EVENT_GRID_NAMESPACE_TOPIC", "")  # only for Namespaces
+EVENT_GRID_KEY = os.environ.get("EVENT_GRID_KEY", "")
 
 # Event types: either single event type for all ops, or map by op
 EVENT_TYPE_MODE = os.environ.get("EVENT_TYPE_MODE", "single").lower()
@@ -69,6 +75,9 @@ EXPIRE_DURATION_MS = 30000
 
 # Cache for retrieved secret (to avoid repeated Key Vault calls)
 _cached_hmac_secret: Optional[str] = None
+
+# Default CloudEvent source when publishing via Event Grid Namespace
+EVENT_GRID_CLOUD_SOURCE = os.environ.get("EVENT_GRID_CLOUD_SOURCE", "/osdu/relay")
 
 
 def _fetch_secret_from_keyvault() -> Optional[str]:
@@ -350,7 +359,65 @@ def _is_valid_hex_like_secret(s: Optional[str]) -> bool:
 
 
 def _forward_to_event_grid(body: bytes) -> requests.Response:
-    """Post the (JSON) body to the configured Event Grid endpoint using SAS key."""
+    """Publish payload to Event Grid using Managed Identity (AAD) when configured, else fallback to Access Key.
+
+    When EVENT_GRID_AUTH == "managed":
+      - Uses DefaultAzureCredential and EventGridPublisherClient.
+      - For Namespace endpoints, optionally supply EVENT_GRID_NAMESPACE_TOPIC.
+
+    When EVENT_GRID_AUTH == "key":
+      - Uses HTTP POST with aeg-sas-key header (legacy path).
+    """
+    # Prefer Managed Identity / AAD
+    if EVENT_GRID_AUTH == "managed":
+        try:
+            credential = DefaultAzureCredential()
+            # For Event Grid Basic, endpoint should be full https URL.
+            # For Namespaces, endpoint is hostname without scheme per SDK docs, but SDK accepts both.
+            namespace_topic = EVENT_GRID_NAMESPACE_TOPIC or None
+            client = EventGridPublisherClient(
+                EVENT_GRID_ENDPOINT,
+                credential,
+                namespace_topic=namespace_topic,
+            )
+            # The SDK expects Python objects (dict/list) not raw bytes; parse once
+            payload = json.loads(body.decode("utf-8"))
+            # If targeting Namespace, ensure CloudEvent schema
+            if namespace_topic and isinstance(payload, list):
+                def to_cloudevent(ev: Dict[str, Any]) -> Dict[str, Any]:
+                    # Map EventGridEvent-like dict to CloudEvent dict
+                    if isinstance(ev, dict) and {"eventType", "data"}.issubset(ev.keys()):
+                        return {
+                            "id": ev.get("id") or str(uuid.uuid4()),
+                            "source": EVENT_GRID_CLOUD_SOURCE,
+                            "type": ev.get("eventType") or EVENT_TYPE_SINGLE,
+                            "subject": ev.get("subject"),
+                            "time": ev.get("eventTime"),
+                            "data": ev.get("data", {}),
+                            "specversion": "1.0",
+                        }
+                    # Assume already CloudEvent-like
+                    return ev
+
+                payload = [to_cloudevent(it) for it in payload]
+
+            client.send(payload)
+            # Mimic requests.Response minimal contract for callers
+            class _Resp:
+                status_code = 200
+                text = "OK"
+
+                def raise_for_status(self):
+                    return None
+
+            return _Resp()
+        except Exception as ex:
+            logging.exception("Managed Identity publish failed; falling back to key if configured. Error: %s", ex)
+            # If key available, try fallback; else re-raise wrapped as HTTPError-like
+            if not EVENT_GRID_KEY:
+                raise
+
+    # Fallback to Access Key over HTTP
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "aeg-sas-key": EVENT_GRID_KEY,
