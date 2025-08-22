@@ -2,7 +2,14 @@
 
 This repository contains a small Azure Functions-based relay that accepts OSDU notification callbacks, validates HMAC signatures (including the OSDU handshake/challenge), optionally translates OSDU DataNotification payloads into Azure Event Grid events, and forwards events to an Event Grid topic.
 
-Key files
+## Why pair OSDU with Azure Event Grid?
+
+- Decouple producers and consumers with reliable, scalable pub/sub and easy fan‑out to many subscribers.
+- Use built‑in capabilities like filtering, retries, and dead‑lettering to increase delivery reliability.
+- Secure by design with Managed Identity/RBAC and optional private networking to protect endpoints and keys.
+- Route events to a wide range of Azure services (Functions, Logic Apps, Service Bus, Storage) or custom webhooks with minimal code.
+
+## Key files
 
 - `OSDURelay/` — Azure Function implementation (`__init__.py`, `function.json`). Route: `/api/osdu-relay`.
 - `local.settings.json` — local development environment variables (not for production).
