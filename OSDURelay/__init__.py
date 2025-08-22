@@ -22,12 +22,23 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import azure.functions as func
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+from urllib.parse import urlparse
 import requests
 
 # ---------------------------------------------------------------------------
 # Configuration (driven by environment)
 # ---------------------------------------------------------------------------
 HMAC_SECRET = os.environ.get("HMAC_SECRET", "")
+# Key Vault configuration (optional). If provided, the function will attempt to
+# retrieve the HMAC secret from Key Vault using DefaultAzureCredential (managed identity
+# when running in Azure). You can provide either the full secret URI (KEY_VAULT_SECRET_URI)
+# or the vault URL + secret name (KEY_VAULT_URL and KEY_VAULT_SECRET_NAME).
+KEY_VAULT_SECRET_URI = os.environ.get("KEY_VAULT_SECRET_URI", "")
+KEY_VAULT_URL = os.environ.get("KEY_VAULT_URL", "")
+KEY_VAULT_SECRET_NAME = os.environ.get("KEY_VAULT_SECRET_NAME", "")
+
 HMAC_HEADER = os.environ.get("HMAC_HEADER", "Authorization")
 HMAC_ALGO = os.environ.get("HMAC_ALGO", "sha256").lower()
 SIGNATURE_FORMAT = os.environ.get("SIGNATURE_FORMAT", "hex").lower()   # "hex" or "base64"
@@ -56,6 +67,70 @@ EVENT_TYPE_BY_OP_DELETE = os.environ.get("EVENT_TYPE_BY_OP_DELETE", "osdu.record
 NOTIFICATION_SERVICE = "de-notification-service"
 EXPIRE_DURATION_MS = 30000
 
+# Cache for retrieved secret (to avoid repeated Key Vault calls)
+_cached_hmac_secret: Optional[str] = None
+
+
+def _fetch_secret_from_keyvault() -> Optional[str]:
+    """Attempt to fetch the HMAC secret from Key Vault using DefaultAzureCredential.
+
+    Supports:
+      - KEY_VAULT_SECRET_URI (full secret URI): https://<vault>.vault.azure.net/secrets/<name>[/<version>]
+      - KEY_VAULT_URL + KEY_VAULT_SECRET_NAME (vault base URL and secret name)
+    """
+    global _cached_hmac_secret
+    if not (KEY_VAULT_SECRET_URI or (KEY_VAULT_URL and KEY_VAULT_SECRET_NAME)):
+        return None
+    try:
+        if KEY_VAULT_SECRET_URI:
+            parsed = urlparse(KEY_VAULT_SECRET_URI)
+            vault_url = f"{parsed.scheme}://{parsed.netloc}"
+            path_parts = [p for p in parsed.path.split("/") if p]
+            if len(path_parts) >= 2 and path_parts[0].lower() == "secrets":
+                secret_name = path_parts[1]
+                secret_version = path_parts[2] if len(path_parts) >= 3 else None
+            else:
+                raise ValueError("KEY_VAULT_SECRET_URI does not contain a valid secret path.")
+        else:
+            vault_url = KEY_VAULT_URL
+            secret_name = KEY_VAULT_SECRET_NAME
+            secret_version = None
+
+        credential = DefaultAzureCredential()
+        client = SecretClient(vault_url=vault_url, credential=credential)
+        if secret_version:
+            secret_bundle = client.get_secret(secret_name, secret_version)
+        else:
+            secret_bundle = client.get_secret(secret_name)
+        value = secret_bundle.value or ""
+        logging.info("Fetched HMAC secret from Key Vault (vault=%s, secret=%s)", vault_url, secret_name)
+        return value
+    except Exception as ex:
+        logging.exception("Failed to fetch secret from Key Vault: %s", ex)
+        raise
+
+
+def _get_hmac_secret() -> Optional[str]:
+    """Return the HMAC secret, preferring Key Vault (if configured), otherwise env var HMAC_SECRET."""
+    global _cached_hmac_secret
+    if _cached_hmac_secret:
+        return _cached_hmac_secret
+
+    try:
+        kv = _fetch_secret_from_keyvault()
+        if kv:
+            _cached_hmac_secret = kv
+            return _cached_hmac_secret
+    except Exception:
+        # Not fatal for local/dev; fall back to env var
+        logging.info("Key Vault secret lookup failed; using HMAC_SECRET from environment if present.")
+
+    if HMAC_SECRET:
+        _cached_hmac_secret = HMAC_SECRET
+        return _cached_hmac_secret
+
+    return None
+
 # ---------------------------------------------------------------------------
 # Cryptographic helpers
 # ---------------------------------------------------------------------------
@@ -68,7 +143,10 @@ def _digest(body: bytes) -> bytes:
     """
     if HMAC_ALGO != "sha256":
         raise ValueError("Only sha256 is supported in this template.")
-    return hmac.new(HMAC_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
+    secret = _get_hmac_secret()
+    if not secret:
+        raise ValueError("Missing HMAC secret (configure KEY_VAULT_SECRET_URI/KEY_VAULT_URL+KEY_VAULT_SECRET_NAME or HMAC_SECRET env var)")
+    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
 
 
 
@@ -401,25 +479,26 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
 
             # If both challenge params present, perform verification and respond
             if crc and hmac_token:
-                if not HMAC_SECRET:
-                    logging.error("HMAC_SECRET not configured.")
+                secret_val = _get_hmac_secret()
+                if not secret_val:
+                    logging.error("HMAC secret not configured. Set KEY_VAULT_SECRET_URI or HMAC_SECRET env var.")
                     return func.HttpResponse("Server misconfigured.", status_code=500)
 
                 # optional heuristic warning for secret format
-                if not _is_valid_hex_like_secret(HMAC_SECRET):
-                    logging.warning("HMAC_SECRET may not conform to OSDU requirements (alphanumeric, even length).")
+                if not _is_valid_hex_like_secret(secret_val):
+                    logging.warning("HMAC secret may not conform to OSDU requirements (alphanumeric, even length).")
 
                 try:
                     if CHALLENGE_HMAC_REQUIRED:
-                        _verify_token_signature(hmac_token, HMAC_SECRET)
+                        _verify_token_signature(hmac_token, secret_val)
                     else:
                         # still attempt verification, but ignore failure if not required
                         try:
-                            _verify_token_signature(hmac_token, HMAC_SECRET)
+                            _verify_token_signature(hmac_token, secret_val)
                         except Exception as ex:
                             logging.info(f"Challenge signature check skipped/ignored: {ex}")
 
-                    response_hash = _get_response_hash(f"{HMAC_SECRET}{crc}")
+                    response_hash = _get_response_hash(f"{secret_val}{crc}")
                     body = json.dumps({"responseHash": response_hash})
                     return func.HttpResponse(body, status_code=200, mimetype="application/json")
                 except Exception as ex:
@@ -440,8 +519,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         body = req.get_body() or b""
         incoming_sig = _extract_incoming_signature(req)
 
-        if not HMAC_SECRET:
-            logging.error("HMAC_SECRET not configured.")
+        secret_val = _get_hmac_secret()
+        if not secret_val:
+            logging.error("HMAC secret not configured. Set KEY_VAULT_SECRET_URI or HMAC_SECRET env var.")
             return func.HttpResponse("Server misconfigured.", status_code=500)
 
         if not incoming_sig:

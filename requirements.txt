@@ -4,3 +4,5 @@
 
 azure-functions
 requests
+azure-identity
+azure-keyvault-secrets

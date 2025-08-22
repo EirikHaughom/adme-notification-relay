@@ -25,6 +25,8 @@ The function is controlled by environment variables (set in `local.settings.json
 - `EVENT_GRID_ENDPOINT` (required) — Event Grid topic endpoint (e.g. https://<my-topic>.<region>.eventgrid.azure.net/api/events)
 - `EVENT_GRID_KEY` (required) — SAS key for your Event Grid topic
 - `HMAC_SECRET` — secret used to validate HMAC signatures (UTF-8 by default; for OSDU challenge chaining a hex-like secret is expected)
+- `KEY_VAULT_SECRET_URI` — (optional) full secret URI on Azure Key Vault. Example: `https://<your-vault>.vault.azure.net/secrets/<secret-name>`; when provided the function will attempt to fetch the HMAC secret from Key Vault using DefaultAzureCredential (managed identity when running in Azure).
+- `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME` — alternate form: provide the vault URL (e.g. `https://<your-vault>.vault.azure.net`) and the secret name separately if you prefer not to provide the full URI.
 - `HMAC_HEADER` — header to read signature from (default `Authorization`)
 - `HMAC_ALGO` — signature algorithm (currently only `sha256` supported)
 - `SIGNATURE_FORMAT` — `hex` (default) or `base64` used for incoming/outgoing signature format
@@ -135,6 +137,10 @@ Troubleshooting
 Contributing
 ------------
 Ideas and fixes welcome. For production hardening, consider adding additional tests, monitoring, and better secrets management.
+
+Key Vault + Managed Identity
+- In production, enable the Function App's Managed Identity (system-assigned or a user-assigned identity) and grant it access to the Key Vault secret. You can either use Key Vault access policies (Secret GET) or Azure RBAC for Key Vault (e.g., "Key Vault Secrets User").
+- When running in Azure, DefaultAzureCredential will automatically use the managed identity to authenticate and retrieve the secret from Key Vault.
 
 License
 -------
