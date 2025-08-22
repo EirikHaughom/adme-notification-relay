@@ -1,0 +1,6 @@
+[
+  {"id":"record_id_1","kind":"kind1","op":"create","recordUpdated":"false"},
+  {"id":"record_id_1","kind":"kind1","op":"create","recordUpdated":"true"},
+  {"id":"record_id_2","kind":"kind2","op":"delete","deletionType":"soft"},
+  {"id":"record_id_3","kind":"kind2","op":"delete","deletionType":"hard"}
+]
