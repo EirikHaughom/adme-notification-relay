@@ -1,10 +1,10 @@
-# OSDU Notification Relay (Azure Functions)
+# OSDU Notification Relay
 
 Minimal webhook relay that:
 
 - Validates OSDU HMAC (including challenge handshake on GET)
-- Optionally translates OSDU DataNotification payloads to Event Grid events
-- Publishes to Azure Event Grid using Managed Identity (preferred)
+- Translates OSDU DataNotification payloads to Event Grid events
+- Publishes to Azure Event Grid using Managed Identity (preferred), Service Principal or Access Key
 
 Endpoint: `GET/POST /api/osdu-relay`
 
@@ -14,20 +14,20 @@ Key files: `OSDURelay/` (function), `deploy/aca/containerapp.yaml` (ACA sample),
 
 Provide these at runtime (Azure Function App or Container App):
 
-- EVENT_GRID_ENDPOINT: Event Grid publish endpoint
+- `EVENT_GRID_ENDPOINT`: Event Grid publish endpoint
   - Basic Topic/Domain: `https://TOPIC_NAME.REGION.eventgrid.azure.net/api/events`
   - Namespace: use your Namespace endpoint host or URL; also set EVENT_GRID_NAMESPACE_TOPIC
-- EVENT_GRID_AUTH: managed (default) | key | sp
-- EVENT_GRID_NAMESPACE_TOPIC: required if publishing to an Event Grid Namespace
-- HMAC_SECRET: only if you don’t use Key Vault
+- `EVENT_GRID_AUTH`: managed (default) | key | sp
+- `EVENT_GRID_NAMESPACE_TOPIC`: required if publishing to an Event Grid Namespace
+- `HMAC_SECRET`: only if you don’t use Key Vault
 - Or use Key Vault (recommended):
-  - KEY_VAULT_SECRET_URI (e.g., <https://VAULT_NAME.vault.azure.net/secrets/HmacSecret/[VERSION]>)
-  - or KEY_VAULT_URL + KEY_VAULT_SECRET_NAME
+  - `KEY_VAULT_SECRET_URI` (e.g., <https://VAULT_NAME.vault.azure.net/secrets/HmacSecret/[VERSION]>)
+  - or `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME`
 
 Azure Functions runtime settings (always required):
 
-- AzureWebJobsStorage: storage connection string
-- FUNCTIONS_WORKER_RUNTIME: python
+- `AzureWebJobsStorage`: storage connection string
+- `FUNCTIONS_WORKER_RUNTIME`: python
 
 Notes:
 
@@ -58,94 +58,94 @@ Prereqs: Azure CLI, Functions Core Tools, Contributor rights.
 
 1. Variables (PowerShell)
 
-```powershell
-$SUB="<subscriptionId>"
-$RG="osdu-relay-rg"
-$LOC="westeurope"
-$STG="osdurelaystg$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-$FUNC="osdu-relay-func"
-$KV="osdurelay-kv"
-# Choose one path for Event Grid
-$EG_TOPIC="osdu-eg-topic"          # Basic Topic name
-$EG_NAMESPACE="osdu-eg-ns"         # Namespace name
-$EG_NS_TOPIC="osdu-eg-ns-topic"    # Namespace Topic name
-```
+    ```powershell
+    $SUB="<subscriptionId>"
+    $RG="osdu-relay-rg"
+    $LOC="westeurope"
+    $STG="osdurelaystg$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
+    $FUNC="osdu-relay-func"
+    $KV="osdurelay-kv"
+    # Choose one path for Event Grid
+    $EG_TOPIC="osdu-eg-topic"          # Basic Topic name
+    $EG_NAMESPACE="osdu-eg-ns"         # Namespace name
+    $EG_NS_TOPIC="osdu-eg-ns-topic"    # Namespace Topic name
+    ```
 
 1. Login and resource group
 
-```powershell
-az login
-az account set --subscription $SUB
-az group create -n $RG -l $LOC
-```
+    ```powershell
+    az login
+    az account set --subscription $SUB
+    az group create -n $RG -l $LOC
+    ```
 
 1. Storage, Key Vault, Event Grid
 
-```powershell
-az storage account create -n $STG -g $RG -l $LOC --sku Standard_LRS
-az keyvault create -n $KV -g $RG -l $LOC
-# Store your HMAC secret in Key Vault
-az keyvault secret set --vault-name $KV --name HmacSecret --value "<REPLACE_WITH_SECRET>"
-
-# EITHER: Basic Topic
-az eventgrid topic create -n $EG_TOPIC -g $RG -l $LOC
-$EG_ENDPOINT = "https://$EG_TOPIC.$LOC-1.eventgrid.azure.net/api/events"
-
-# OR: Namespace + Namespace Topic
-# az eventgrid namespace create -n $EG_NAMESPACE -g $RG -l $LOC
-# az eventgrid namespace topic create --namespace-name $EG_NAMESPACE -n $EG_NS_TOPIC -g $RG
-# $EG_ENDPOINT = "$EG_NAMESPACE.$LOC-1.eventgrid.azure.net"  # use namespace endpoint host or URL
-```
+    ```powershell
+    az storage account create -n $STG -g $RG -l $LOC --sku Standard_LRS
+    az keyvault create -n $KV -g $RG -l $LOC
+    # Store your HMAC secret in Key Vault
+    az keyvault secret set --vault-name $KV --name HmacSecret --value "<REPLACE_WITH_SECRET>"
+    
+    # EITHER: Basic Topic
+    az eventgrid topic create -n $EG_TOPIC -g $RG -l $LOC
+    $EG_ENDPOINT = "https://$EG_TOPIC.$LOC-1.eventgrid.azure.net/api/events"
+    
+    # OR: Namespace + Namespace Topic
+    # az eventgrid namespace create -n $EG_NAMESPACE -g $RG -l $LOC
+    # az eventgrid namespace topic create --namespace-name $EG_NAMESPACE -n $EG_NS_TOPIC -g $RG
+    # $EG_ENDPOINT = "$EG_NAMESPACE.$LOC-1.eventgrid.azure.net"  # use namespace endpoint host or URL
+    ```
 
 1. Function App and Managed Identity
 
-```powershell
-az functionapp create --resource-group $RG --consumption-plan-location $LOC `
-   --name $FUNC --storage-account $STG --runtime python --runtime-version 3.10 --functions-version 4
-
-az functionapp identity assign -g $RG -n $FUNC | Out-Null
-$PRINCIPAL = az functionapp identity show -g $RG -n $FUNC --query principalId -o tsv
-```
+    ```powershell
+    az functionapp create --resource-group $RG --consumption-plan-location $LOC `
+       --name $FUNC --storage-account $STG --runtime python --runtime-version 3.10 --functions-version 4
+    
+    az functionapp identity assign -g $RG -n $FUNC | Out-Null
+    $PRINCIPAL = az functionapp identity show -g $RG -n $FUNC --query principalId -o tsv
+    ```
 
 1. Grant access (Key Vault + Event Grid)
 
-```powershell
-$KV_ID = az keyvault show -n $KV -g $RG --query id -o tsv
-az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
-   --role "Key Vault Secrets User" --scope $KV_ID | Out-Null
-
-# Basic Topic scope (if using Basic)
-$EG_TOPIC_ID = az eventgrid topic show -n $EG_TOPIC -g $RG --query id -o tsv 2>$null
-if ($EG_TOPIC_ID) {
-   az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
-      --role "Event Grid Data Sender" --scope $EG_TOPIC_ID | Out-Null
-}
-
-# Namespace Topic scope (if using Namespace)
-# $EG_NS_TOPIC_ID = az eventgrid namespace topic show --namespace-name $EG_NAMESPACE -n $EG_NS_TOPIC -g $RG --query id -o tsv
-# az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
-#   --role "Event Grid Data Sender" --scope $EG_NS_TOPIC_ID | Out-Null
-```
+    ```powershell
+    $KV_ID = az keyvault show -n $KV -g $RG --query id -o tsv
+    az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
+       --role "Key Vault Secrets User" --scope $KV_ID | Out-Null
+    
+    # Basic Topic scope (if using Basic)
+    $EG_TOPIC_ID = az eventgrid topic show -n $EG_TOPIC -g $RG --query id -o tsv 2>$null
+    if ($EG_TOPIC_ID) {
+       az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
+          --role "Event Grid Data Sender" --scope $EG_TOPIC_ID | Out-Null
+    }
+    
+    # Namespace Topic scope (if using Namespace)
+    # $EG_NS_TOPIC_ID = az eventgrid namespace topic show --namespace-name $EG_NAMESPACE -n $EG_NS_TOPIC -g $RG --query id -o tsv
+    # az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
+    #   --role "Event Grid Data Sender" --scope $EG_NS_TOPIC_ID | Out-Null
+    ```
 
 1. Configure app settings
 
-```powershell
-# Use Key Vault (preferred)
-az functionapp config appsettings set -g $RG -n $FUNC --settings `
-   KEY_VAULT_URL="https://$KV.vault.azure.net" `
-   KEY_VAULT_SECRET_NAME="HmacSecret" `
-   EVENT_GRID_ENDPOINT="$EG_ENDPOINT" `
-   EVENT_GRID_AUTH="managed" `
-   EVENT_GRID_NAMESPACE_TOPIC="$EG_NS_TOPIC"
-```
+    ```powershell
+    # Use Key Vault (preferred)
+    az functionapp config appsettings set -g $RG -n $FUNC --settings `
+       KEY_VAULT_URL="https://$KV.vault.azure.net" `
+       KEY_VAULT_SECRET_NAME="HmacSecret" `
+       EVENT_GRID_ENDPOINT="$EG_ENDPOINT" `
+       EVENT_GRID_AUTH="managed" `
+       EVENT_GRID_NAMESPACE_TOPIC="$EG_NS_TOPIC"
+    ```
 
 1. Deploy code
 
-```powershell
-func azure functionapp publish $FUNC --python
-```
+    ```powershell
+    func azure functionapp publish $FUNC --python
+    ```
 
-Endpoint: `https://$FUNC.azurewebsites.net/api/osdu-relay`
+    Endpoint: `https://$FUNC.azurewebsites.net/api/osdu-relay`
 
 ## Deploy as Azure Container App (Managed Identity)
 
@@ -215,23 +215,23 @@ az containerapp create -g $RG -n $APP --environment $ACA_ENV `
 
 1. Grant access (Managed Identity)
 
-```powershell
-$PRINCIPAL = az containerapp show -g $RG -n $APP --query identity.principalId -o tsv
-$KV_ID = az keyvault show -n $KV -g $RG --query id -o tsv
-$EG_TOPIC_ID = az eventgrid topic show -n $EG_TOPIC -g $RG --query id -o tsv
-
-az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
-   --role "Key Vault Secrets User" --scope $KV_ID | Out-Null
-az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
-   --role "Event Grid Data Sender" --scope $EG_TOPIC_ID | Out-Null
-```
+    ```powershell
+    $PRINCIPAL = az containerapp show -g $RG -n $APP --query identity.principalId -o tsv
+    $KV_ID = az keyvault show -n $KV -g $RG --query id -o tsv
+    $EG_TOPIC_ID = az eventgrid topic show -n $EG_TOPIC -g $RG --query id -o tsv
+    
+    az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
+       --role "Key Vault Secrets User" --scope $KV_ID | Out-Null
+    az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal `
+       --role "Event Grid Data Sender" --scope $EG_TOPIC_ID | Out-Null
+    ```
 
 1. Get URL and test
 
-```powershell
-az containerapp show -g $RG -n $APP --query properties.configuration.ingress.fqdn -o tsv
-# Open: https://<FQDN>/api/osdu-relay
-```
+    ```powershell
+    az containerapp show -g $RG -n $APP --query properties.configuration.ingress.fqdn -o tsv
+    # Open: https://<FQDN>/api/osdu-relay
+    ```
 
 Tip: A ready-to-edit manifest is in `deploy/aca/containerapp.yaml` if you prefer YAML.
 
@@ -255,4 +255,6 @@ python tests/test-post.py
 - Grant minimum RBAC: Key Vault Secrets User, Event Grid Data Sender.
 - Never commit real secrets to Git.
 
-License: MIT (see `LICENSE`).
+## License
+
+MIT (see [LICENSE](./LICENSE)).
