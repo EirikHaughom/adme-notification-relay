@@ -145,7 +145,35 @@ func host start
 
 ## Run in a container (Docker)
 
-There are two options: plain Docker or docker-compose (includes Azurite for local Storage).
+There are three options: prebuilt image from Docker Hub, plain Docker, or docker-compose (includes Azurite for local Storage).
+
+### Option 0: Prebuilt image from Docker Hub
+
+If you don't want to build locally, pull the published image and run it:
+
+```powershell
+docker pull eirikhaughom/adme-notification-relay:main
+```
+
+Run with your environment variables (either via an .env file or inline -e flags):
+
+```powershell
+# Using an .env file (recommended)
+docker run --rm -p 7071:80 --env-file .env eirikhaughom/adme-notification-relay:main
+
+# Or pass a few settings inline (example)
+docker run --rm --name osdu-notification-broker `
+   -p 7071:80 `
+   -e AzureWebJobsStorage="UseDevelopmentStorage=true" `
+   -e FUNCTIONS_WORKER_RUNTIME="python" `
+   -e EVENT_GRID_ENDPOINT="https://<topic>.<region>.eventgrid.azure.net/api/events" `
+   -e EVENT_GRID_AUTH="key" `
+   -e EVENT_GRID_KEY="<your-event-grid-access-key>" `
+   -e HMAC_SECRET="<your-hmac-secret>" `
+   eirikhaughom/adme-notification-relay:main
+```
+
+Note: The tag `main` tracks builds from the repository's main branch.
 
 ### Option 1: Plain Docker
 
