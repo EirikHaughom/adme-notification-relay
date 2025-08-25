@@ -159,7 +159,7 @@ Prereqs: Azure CLI, Functions Core Tools, Contributor rights.
 
 ## Deploy as Azure Container App (Managed Identity)
 
-Prereqs: Azure CLI, an image registry (e.g., ACR).
+Prereqs: Azure CLI. No private registry needed; image is on Docker Hub.
 
 1. Variables
 
@@ -169,8 +169,6 @@ Prereqs: Azure CLI, an image registry (e.g., ACR).
     $LOC="westeurope"
     $ACA_ENV="osdu-relay-env"
     $APP="osdu-relay-aca"
-    $ACR="osdurelayacr$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-    $IMG="osdu-relay:latest"
     $STG="osdurelaystg$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
     $KV="osdurelay-kv"
     $EG_TOPIC="osdu-eg-topic"
@@ -184,12 +182,9 @@ Prereqs: Azure CLI, an image registry (e.g., ACR).
     az group create -n $RG -l $LOC
     ```
 
-1. Registry, image, storage, Key Vault, Event Grid
+1. Storage, Key Vault, Event Grid
 
     ```powershell
-    az acr create -n $ACR -g $RG -l $LOC --sku Basic
-    az acr login -n $ACR
-    
     az storage account create -n $STG -g $RG -l $LOC --sku Standard_LRS
     $STG_CONN = az storage account show-connection-string -n $STG -g $RG --query connectionString -o tsv
     
@@ -198,19 +193,16 @@ Prereqs: Azure CLI, an image registry (e.g., ACR).
     
     az eventgrid topic create -n $EG_TOPIC -g $RG -l $LOC
     $EG_ENDPOINT = "https://$EG_TOPIC.$LOC-1.eventgrid.azure.net/api/events"
-    
-    # Build and push image
-    az acr build -r $ACR -t $IMG .
     ```
 
 1. Container Apps environment and app
 
     ```powershell
     az containerapp env create -g $RG -n $ACA_ENV -l $LOC
-    
+
+    # Use the public image on Docker Hub
     az containerapp create -g $RG -n $APP --environment $ACA_ENV `
-       --image "$(az acr show -n $ACR --query loginServer -o tsv)/$IMG" `
-       --registry-server $(az acr show -n $ACR --query loginServer -o tsv) `
+       --image eirikhaughom/adme-notification-relay:main `
        --ingress external --target-port 80 `
        --system-assigned `
        --secrets storage-conn="$STG_CONN" `
@@ -243,7 +235,7 @@ Prereqs: Azure CLI, an image registry (e.g., ACR).
     # Open: https://<FQDN>/api/osdu-relay
     ```
 
-Tip: A ready-to-edit manifest is in `deploy/aca/containerapp.yaml` if you prefer YAML.
+Tip: A ready-to-edit manifest is in `deploy/aca/containerapp.yaml` and already points to the Docker Hub image; no registry credentials are required.
 
 ## Local testing (optional)
 

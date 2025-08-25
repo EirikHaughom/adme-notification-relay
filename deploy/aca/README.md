@@ -5,34 +5,27 @@ This project runs as an Azure Functions host inside a custom container. You can 
 ## Prereqs
 
 - Azure CLI and Azure Container Apps extension
-- Azure Container Registry (ACR) or another registry to host the image
 - An Azure Container Apps Environment
 - A Storage connection string (Functions runtime requirement)
 - Event Grid destination configured (endpoint + key, or use Managed Identity)
 
-## Build and push the image
+## Image location
+
+The container image is published publicly to Docker Hub:
+
+- Repository: eirikhaughom/adme-notification-relay
+- Tag: main
+
+Pull directly with:
 
 ```powershell
-# Variables
-$ACR="<acrName>"           # e.g., myregistry
-$RG="<resourceGroup>"
-$IMAGE="osdu-notification-broker:latest"
-
-# Login
-az acr login -n $ACR
-
-# Build and push using ACR Build (recommended)
-az acr build -r $ACR -t $IMAGE .
-
-# The full image reference will be: <acrName>.azurecr.io/osdu-notification-broker:latest
+docker pull eirikhaughom/adme-notification-relay:main
 ```
 
 ## Create secrets and deploy
 
 ### Step 1: Prepare values
 
-- ACR login server: `<acrName>.azurecr.io`
-- ACR username/password or use a Managed Identity/ACR pull role
 - Storage connection string for `AzureWebJobsStorage`
 - Event Grid endpoint and key (or set `EVENT_GRID_AUTH=managed` and assign RBAC)
 
@@ -41,7 +34,6 @@ az acr build -r $ACR -t $IMAGE .
 Update `deploy/aca/containerapp.yaml` and replace placeholders:
 
 - `<SUBSCRIPTION_ID>`, `<RG_NAME>`, `<ENV_NAME>` for the Container Apps Environment
-- `<ACR_LOGIN_SERVER>`, `<ACR_USERNAME>`, `<ACR_PASSWORD>` or switch to Managed Identity image pull
 - `<AZURE_STORAGE_CONNECTION_STRING>`
 - `<TOPIC_OR_NAMESPACE_HOST>`, `<EVENT_GRID_KEY>` or set `EVENT_GRID_AUTH=managed`
 - `<HMAC_SECRET>` (or use Key Vault via `KEY_VAULT_SECRET_URI` and Managed Identity)
@@ -75,4 +67,4 @@ az containerapp update `
 
 - Ingress targetPort is 80 because the Azure Functions base image listens on 80.
 - Scale rules are example values; adjust for your traffic.
-- If you prefer registry secrets via Managed Identity, replace the `registries` block with an ACR pull identity binding and remove `acr-pat` secret.
+- The manifest references the Docker Hub image; no registry credentials are required.

@@ -14,13 +14,7 @@ properties:
       external: true
       targetPort: 80
       transport: auto
-    registries:
-      - server: <ACR_LOGIN_SERVER>
-        username: <ACR_USERNAME>
-        passwordSecretRef: acr-pat
     secrets:
-      - name: acr-pat
-        value: <ACR_PASSWORD>
       - name: storage-conn
         value: <AZURE_STORAGE_CONNECTION_STRING>
       - name: eventgrid-key
@@ -28,7 +22,8 @@ properties:
   template:
     containers:
       - name: api
-        image: <ACR_LOGIN_SERVER>/osdu-notification-broker:latest
+        # Public image hosted on Docker Hub (no registry credentials required)
+        image: eirikhaughom/adme-notification-relay:main
         resources:
           cpu: 0.5
           memory: 1Gi
