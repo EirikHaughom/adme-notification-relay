@@ -71,31 +71,47 @@ Set these in `local.settings.json` for local dev or as App Settings in Azure. �
 | Variable | Required? | Default | Description |
 | --- | --- | --- | --- |
 | `EVENT_GRID_ENDPOINT` | Yes | — | Event Grid endpoint. Basic topics/domains: full URL like `https://TOPIC.REGION.eventgrid.azure.net/api/events`. Namespaces: the endpoint host (or URL) like `NAMESPACE.REGION.eventgrid.azure.net`. |
-| `EVENT_GRID_AUTH` | No | `managed` | Auth mode for publishing: `managed` (Managed Identity/AAD via DefaultAzureCredential) or `key` (access key header). |
+| `EVENT_GRID_AUTH` | No | `managed` | Auth mode for publishing: `managed` (Managed Identity/AAD via DefaultAzureCredential), `sp` (Service Principal: Client ID/Secret), or `key` (access key header). |
 | `EVENT_GRID_KEY` | Conditional | — | Required only when `EVENT_GRID_AUTH=key`. Event Grid access key used for the `aeg-sas-key` header. |
 | `EVENT_GRID_NAMESPACE_TOPIC` | Conditional | — | Required when publishing to an Event Grid Namespace (the Namespace Topic name). Not used for Basic topics/domains. |
 | `EVENT_GRID_CLOUD_SOURCE` | No | `/osdu/relay` | Default CloudEvent `source` when converting to CloudEvents for Namespace publishing. |
 | `HMAC_SECRET` | Conditional | — | Secret used to validate HMAC signatures. Provide if Key Vault is not configured. For OSDU challenge chaining, a hex-like secret is expected. |
-| `KEY_VAULT_SECRET_URI` | Conditional | — | Full Key Vault secret URI (e.g., `https://<vault>.vault.azure.net/secrets/<name>[/<version>]`). Provide this or the `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME` pair to fetch the HMAC secret via Managed Identity. |
+| `KEY_VAULT_SECRET_URI` | Conditional | — | Full Key Vault secret URI (e.g., `https://<vault>.vault.azure.net/secrets/<name>[/<version>]`). Provide this or the `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME` pair to fetch the HMAC secret via AAD. |
 | `KEY_VAULT_URL` | Conditional | — | Vault URL (e.g., `https://<vault>.vault.azure.net`). Use together with `KEY_VAULT_SECRET_NAME` instead of `KEY_VAULT_SECRET_URI`. |
 | `KEY_VAULT_SECRET_NAME` | Conditional | — | Secret name in Key Vault. Use together with `KEY_VAULT_URL`. |
+| `KEY_VAULT_AUTH` | No | `managed` | Auth mode for Key Vault: `managed` (DefaultAzureCredential) or `sp` (Service Principal: Client ID/Secret). |
 | `HMAC_HEADER` | No | `Authorization` | Header to read the signature from. |
 | `HMAC_ALGO` | No | `sha256` | Signature algorithm. Only `sha256` is supported. |
 | `SIGNATURE_FORMAT` | No | `hex` | Outgoing/expected signature encoding: `hex` or `base64`. |
 | `SIGNATURE_PREFIX` | No | `hmac` | Prefix stripped from incoming header value (case-insensitive). Default is "hmac " (with a trailing space). |
 | `CHALLENGE_HMAC_REQUIRED` | No | `true` | Whether GET challenge verification must validate the `hmac` token. |
-| `CHALLENGE_HASH_ENCODING` | No | `base64-hex` | Encoding for the challenge `responseHash`: `base64-raw`, `base64-hex`, or `hex`. |
+| `CHALLENGE_HASH_ENCODING` | No | `base64` | Encoding for the challenge `responseHash`: `base64-raw` (aka `base64`), `base64-hex`, or `hex`. |
 | `EVENT_TYPE_MODE` | No | `single` | Event type strategy for translated OSDU items: `single` or `by_op`. |
 | `EVENT_TYPE_SINGLE` | No | `osdu.record.changed` | Event type used when `EVENT_TYPE_MODE=single`. |
 | `EVENT_TYPE_BY_OP_CREATE` | No | `osdu.record.create` | Event type for create operations when `EVENT_TYPE_MODE=by_op`. |
 | `EVENT_TYPE_BY_OP_UPDATE` | No | `osdu.record.update` | Event type for update operations when `EVENT_TYPE_MODE=by_op`. |
 | `EVENT_TYPE_BY_OP_DELETE` | No | `osdu.record.delete` | Event type for delete operations when `EVENT_TYPE_MODE=by_op`. |
 
+Service Principal variables (used when `*_AUTH=sp`). You can set shared defaults via `AZURE_*` and optionally override per service:
+
+| Variable | Required? | Default | Description |
+| --- | --- | --- | --- |
+| `AZURE_TENANT_ID` | Conditional | — | Default tenant for SP auth. Used if per-service tenant is not provided. |
+| `AZURE_CLIENT_ID` | Conditional | — | Default client ID for SP auth. Used if per-service client ID is not provided. |
+| `AZURE_CLIENT_SECRET` | Conditional | — | Default client secret for SP auth. Used if per-service client secret is not provided. |
+| `KEY_VAULT_TENANT_ID` | Conditional | — | Tenant to use specifically for Key Vault when `KEY_VAULT_AUTH=sp`. Falls back to `AZURE_TENANT_ID`. |
+| `KEY_VAULT_CLIENT_ID` | Conditional | — | Client ID to use specifically for Key Vault when `KEY_VAULT_AUTH=sp`. Falls back to `AZURE_CLIENT_ID`. |
+| `KEY_VAULT_CLIENT_SECRET` | Conditional | — | Client secret to use specifically for Key Vault when `KEY_VAULT_AUTH=sp`. Falls back to `AZURE_CLIENT_SECRET`. |
+| `EVENT_GRID_TENANT_ID` | Conditional | — | Tenant to use specifically for Event Grid when `EVENT_GRID_AUTH=sp`. Falls back to `AZURE_TENANT_ID`. |
+| `EVENT_GRID_CLIENT_ID` | Conditional | — | Client ID to use specifically for Event Grid when `EVENT_GRID_AUTH=sp`. Falls back to `AZURE_CLIENT_ID`. |
+| `EVENT_GRID_CLIENT_SECRET` | Conditional | — | Client secret to use specifically for Event Grid when `EVENT_GRID_AUTH=sp`. Falls back to `AZURE_CLIENT_SECRET`. |
+
 Notes on “Conditional”:
 
 - `EVENT_GRID_KEY` is required only in key auth mode (`EVENT_GRID_AUTH=key`).
 - `EVENT_GRID_NAMESPACE_TOPIC` is required only when targeting Event Grid Namespace.
 - One of `HMAC_SECRET` or the Key Vault settings (`KEY_VAULT_SECRET_URI` OR `KEY_VAULT_URL` + `KEY_VAULT_SECRET_NAME`) must be configured so the function can validate signatures.
+- For SP auth, provide either the shared `AZURE_*` or the per-service `KEY_VAULT_*` / `EVENT_GRID_*` credentials depending on which service(s) you use SP for.
 
 Security note: Never commit real secrets (e.g., `EVENT_GRID_KEY` or `HMAC_SECRET`) to source control. Use Azure Key Vault / managed identities in production.
 
@@ -127,6 +143,40 @@ func host start
 
    (You can also use the VS Code task `func: host start` as configured in this workspace.)
 
+## Run in a container (Docker)
+
+There are two options: plain Docker or docker-compose (includes Azurite for local Storage).
+
+### Option 1: Plain Docker
+
+- Copy `.env.example` to `.env` and fill in values. For local Docker, either:
+   - Use a real storage connection string for `AzureWebJobsStorage`, or
+   - Start Azurite yourself and point `AzureWebJobsStorage` at it.
+
+- Build and run:
+
+```powershell
+docker build -t osdu-notification-broker:local .
+docker run --rm -p 7071:80 --env-file .env osdu-notification-broker:local
+```
+
+### Option 2: docker-compose (with Azurite)
+
+- Copy `.env.example` to `.env` and fill in the required values (no need to set `AzureWebJobsStorage`; compose injects an Azurite connection string).
+
+- Start:
+
+```powershell
+docker compose up --build
+```
+
+The function will be available at `http://localhost:7071/api/osdu-relay`.
+
+Notes:
+
+- For local testing, if you don’t have Managed Identity available, set `EVENT_GRID_AUTH=key` and provide `EVENT_GRID_KEY` along with a valid `EVENT_GRID_ENDPOINT`.
+- Never commit real secrets; `.dockerignore` excludes `local.settings.json`. Use `.env` for local only.
+
 ## Testing the function
 
 - To POST a sample OSDU DataNotification payload and automatically compute the HMAC header, run:
@@ -155,6 +205,15 @@ curl -X POST "http://localhost:7071/api/osdu-relay" \
 
   Note: on Windows PowerShell the `curl` alias maps to Invoke-WebRequest; prefer the provided Python test scripts to compute the correct signature.
 
+### Handshake parameter names
+
+The function accepts the following query parameter names for the OSDU challenge handshake for compatibility with various implementations:
+
+- `crc` (preferred) or `crcToken` (aliases: `challenge`, `token`)
+- `hmac` (preferred) or `hmacToken` (aliases: `signature`, `sig`)
+
+The response contains `{ "responseHash": "..." }`, where `responseHash` defaults to Base64 of the raw SHA‑256 digest of `HMAC_SECRET + crc` (`CHALLENGE_HASH_ENCODING=base64`). You can switch to `base64-hex` or `hex` via app settings.
+
 ## How the function decides translation
 
 - Incoming JSON that is a list will be inspected:
@@ -166,6 +225,7 @@ curl -X POST "http://localhost:7071/api/osdu-relay" \
 
 - Managed Identity: Enable system-assigned or user-assigned identity on the Function App and assign RBAC role "Event Grid Data Sender" to the target topic/domain/namespace topic. Set `EVENT_GRID_AUTH=managed`. No key is required.
 - Key auth: Set `EVENT_GRID_AUTH=key` and provide `EVENT_GRID_KEY` to use the legacy `aeg-sas-key` header.
+- Service Principal (Client ID/Secret): Set `EVENT_GRID_AUTH=sp` and provide `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` (or the Event Grid-specific overrides). Ensure the app registration has proper RBAC, e.g., "Event Grid Data Sender" on your target. For Key Vault access via SP, set `KEY_VAULT_AUTH=sp` and provide the `AZURE_*` values or Key Vault-specific overrides, and grant it secret read permissions (RBAC role like "Key Vault Secrets User" or an access policy).
 
 ## Troubleshooting / Dry-run
 
@@ -255,6 +315,11 @@ A simple example using Azure CLI + Functions Core Tools:
     ```powershell
     func azure functionapp publish FUNCTION_APP_NAME --python
     ```
+
+### Deploy as Azure Container App
+
+- Build and push the container (to ACR or your registry), then deploy with Azure Container Apps.
+- See `deploy/aca/README.md` for a step-by-step guide and a sample manifest at `deploy/aca/containerapp.yaml`.
 
 ## Security and production notes
 

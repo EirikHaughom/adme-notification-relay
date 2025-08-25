@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import azure.functions as func
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, ClientSecretCredential
 from azure.eventgrid import EventGridPublisherClient
 from azure.keyvault.secrets import SecretClient
 from urllib.parse import urlparse
@@ -48,19 +48,40 @@ SIGNATURE_PREFIX = os.environ.get("SIGNATURE_PREFIX", "hmac ")
 # Challenge/handshake behavior
 CHALLENGE_HMAC_REQUIRED = os.environ.get("CHALLENGE_HMAC_REQUIRED", "true").lower() == "true"
 # Choice for challenge response hash representation. Known values:
-# - base64-raw (recommended): raw SHA-256 bytes base64-encoded
-# - base64-hex (legacy): hex string of SHA-256, base64-encoded
+# - base64-raw: raw SHA-256 bytes base64-encoded
+# - base64-hex: hex string of SHA-256, base64-encoded (matches provided Java sample)
 # - hex: hex string of SHA-256
+# Default set to base64-hex to align 1:1 with the provided Java snippet.
 CHALLENGE_HASH_ENCODING = os.environ.get("CHALLENGE_HASH_ENCODING", "base64-hex").lower()
 
 # Event Grid configuration
 # EVENT_GRID_ENDPOINT is required. Authentication can be via:
 #  - Managed Identity / AAD (DefaultAzureCredential). Set EVENT_GRID_AUTH to "managed" (default) and grant Data Sender role.
 #  - Access Key. Set EVENT_GRID_AUTH to "key" and provide EVENT_GRID_KEY.
+#  - Service Principal (Client ID/Secret). Set EVENT_GRID_AUTH to "sp" and provide AZURE_* or EVENT_GRID_* credentials.
 EVENT_GRID_ENDPOINT = os.environ["EVENT_GRID_ENDPOINT"]
-EVENT_GRID_AUTH = os.environ.get("EVENT_GRID_AUTH", "managed").lower()  # managed | key
+EVENT_GRID_AUTH = os.environ.get("EVENT_GRID_AUTH", "managed").lower()  # managed | key | sp
 EVENT_GRID_NAMESPACE_TOPIC = os.environ.get("EVENT_GRID_NAMESPACE_TOPIC", "")  # only for Namespaces
 EVENT_GRID_KEY = os.environ.get("EVENT_GRID_KEY", "")
+
+# Key Vault authentication mode
+#  - managed (default): DefaultAzureCredential (Managed Identity etc.)
+#  - sp: explicit ClientSecretCredential using AZURE_* or KEY_VAULT_* variables
+KEY_VAULT_AUTH = os.environ.get("KEY_VAULT_AUTH", "managed").lower()
+
+# Optional shared Service Principal credentials (used when *_AUTH=sp)
+AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
+AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
+AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "")
+
+# Optional service-specific SP overrides
+KEY_VAULT_TENANT_ID = os.environ.get("KEY_VAULT_TENANT_ID", "")
+KEY_VAULT_CLIENT_ID = os.environ.get("KEY_VAULT_CLIENT_ID", "")
+KEY_VAULT_CLIENT_SECRET = os.environ.get("KEY_VAULT_CLIENT_SECRET", "")
+
+EVENT_GRID_TENANT_ID = os.environ.get("EVENT_GRID_TENANT_ID", "")
+EVENT_GRID_CLIENT_ID = os.environ.get("EVENT_GRID_CLIENT_ID", "")
+EVENT_GRID_CLIENT_SECRET = os.environ.get("EVENT_GRID_CLIENT_SECRET", "")
 
 # Event types: either single event type for all ops, or map by op
 EVENT_TYPE_MODE = os.environ.get("EVENT_TYPE_MODE", "single").lower()
@@ -78,6 +99,42 @@ _cached_hmac_secret: Optional[str] = None
 
 # Default CloudEvent source when publishing via Event Grid Namespace
 EVENT_GRID_CLOUD_SOURCE = os.environ.get("EVENT_GRID_CLOUD_SOURCE", "/osdu/relay")
+
+
+def _build_credential(service: str = ""):
+    """Return a TokenCredential for the given service.
+
+    service: "keyvault" or "eventgrid" (optional).
+    Uses *_AUTH env vars to select between DefaultAzureCredential (managed) and ClientSecretCredential (sp).
+    """
+    svc = (service or "").lower()
+
+    if svc == "keyvault":
+        mode = KEY_VAULT_AUTH
+        if mode == "sp":
+            tenant = KEY_VAULT_TENANT_ID or AZURE_TENANT_ID
+            client = KEY_VAULT_CLIENT_ID or AZURE_CLIENT_ID
+            secret = KEY_VAULT_CLIENT_SECRET or AZURE_CLIENT_SECRET
+            if not (tenant and client and secret):
+                raise ValueError("KEY_VAULT_AUTH=sp but client credentials are missing (set KEY_VAULT_* or AZURE_* vars)")
+            return ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=secret)
+        # default
+        return DefaultAzureCredential()
+
+    if svc == "eventgrid":
+        mode = EVENT_GRID_AUTH
+        if mode == "sp":
+            tenant = EVENT_GRID_TENANT_ID or AZURE_TENANT_ID
+            client = EVENT_GRID_CLIENT_ID or AZURE_CLIENT_ID
+            secret = EVENT_GRID_CLIENT_SECRET or AZURE_CLIENT_SECRET
+            if not (tenant and client and secret):
+                raise ValueError("EVENT_GRID_AUTH=sp but client credentials are missing (set EVENT_GRID_* or AZURE_* vars)")
+            return ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=secret)
+        # managed path
+        return DefaultAzureCredential()
+
+    # Fallback
+    return DefaultAzureCredential()
 
 
 def _fetch_secret_from_keyvault() -> Optional[str]:
@@ -105,7 +162,7 @@ def _fetch_secret_from_keyvault() -> Optional[str]:
             secret_name = KEY_VAULT_SECRET_NAME
             secret_version = None
 
-        credential = DefaultAzureCredential()
+        credential = _build_credential("keyvault")
         client = SecretClient(vault_url=vault_url, credential=credential)
         if secret_version:
             secret_bundle = client.get_secret(secret_name, secret_version)
@@ -211,6 +268,31 @@ def _extract_incoming_signature(req: func.HttpRequest) -> str:
     return sig
 
 # ---------------------------------------------------------------------------
+# Lightweight detector for OSDU-style token on POST (base64Payload.hexSig)
+# ---------------------------------------------------------------------------
+
+
+def _looks_like_osdu_token(sig: str) -> bool:
+    """Heuristically determine if the provided signature looks like an OSDU token.
+
+    Expected form: <base64_json_payload>.<hex_signature>
+    We'll attempt to decode the base64 segment and look for expected keys.
+    """
+    if not sig or "." not in sig:
+        return False
+    try:
+        b64, _ = sig.split(".", 1)
+        # base64url padding fixup
+        pad = "=" * ((4 - len(b64) % 4) % 4)
+        payload_raw = base64.b64decode(b64 + pad)
+        payload = json.loads(payload_raw.decode("utf-8"))
+        return isinstance(payload, dict) and all(
+            k in payload for k in ("expireMillisecond", "endpointUrl", "nonce")
+        )
+    except Exception:
+        return False
+
+# ---------------------------------------------------------------------------
 # Helpers used for OSDU handshake verification (challenge)
 # ---------------------------------------------------------------------------
 
@@ -242,6 +324,26 @@ def _hex_to_bytes(s: Optional[str]) -> bytes:
     return val.encode("utf-8")
 
 
+def _strict_hex_to_bytes(s: Optional[str]) -> bytes:
+    """Strict hex-to-bytes conversion (to mirror Java DatatypeConverter.parseHexBinary).
+
+    - Accepts optional 0x prefix.
+    - Requires the remaining characters to be [A-Fa-f0-9]+ with even length.
+    - Raises ValueError if invalid.
+    """
+    if s is None:
+        raise ValueError("Error generating signature")
+    val = str(s).strip()
+    if val.startswith(("0x", "0X")):
+        val = val[2:]
+    if not re.fullmatch(r"[A-Fa-f0-9]+", val or "") or len(val) % 2 != 0:
+        raise ValueError("Error generating signature")
+    try:
+        return bytes.fromhex(val)
+    except Exception:
+        # Match Java behavior of surfacing a generic generation error
+        raise ValueError("Error generating signature")
+
 
 def _hmac_sha256_bytes(data: bytes, key: bytes) -> bytes:
     """HMAC-SHA256 producing raw bytes (convenience wrapper)."""
@@ -260,8 +362,9 @@ def _compute_signature_chain(secret_hex: str, nonce_hex: str, timestamp_str: str
 
     Returns the raw signature bytes.
     """
-    secret_bytes = _hex_to_bytes(secret_hex)
-    nonce_bytes = _hex_to_bytes(nonce_hex)
+    # Strictly parse secret and nonce as hex to mirror Java's DatatypeConverter.parseHexBinary
+    secret_bytes = _strict_hex_to_bytes(secret_hex)
+    nonce_bytes = _strict_hex_to_bytes(nonce_hex)
 
     encrypted_nonce = _hmac_sha256_bytes(nonce_bytes, secret_bytes)
     encrypted_timestamp = _hmac_sha256_bytes(timestamp_str.encode("utf-8"), encrypted_nonce)
@@ -276,7 +379,7 @@ def _get_signed_signature(url: str, secret_hex: str, expire_ms_str: str, nonce_h
     Validates that the expiry hasn't passed and then computes the signature bytes
     via _compute_signature_chain, returning a lowercase hex string.
     """
-    if not url or not secret_hex:
+    if not url or not secret_hex or not str(expire_ms_str).isdigit():
         raise ValueError("Error generating signature")
     expiry = int(expire_ms_str)
     if int(time.time() * 1000) > expiry:
@@ -287,7 +390,11 @@ def _get_signed_signature(url: str, secret_hex: str, expire_ms_str: str, nonce_h
 
     # Data must be formatted exactly as expected by the signer
     data = f'{{"expireMillisecond": "{expire_ms_str}","hashMechanism": "hmacSHA256","endpointUrl": "{url}","nonce": "{nonce_hex}"}}'
-    sig_bytes = _compute_signature_chain(secret_hex, nonce_hex, timestamp, data)
+    try:
+        sig_bytes = _compute_signature_chain(secret_hex, nonce_hex, timestamp, data)
+    except ValueError as ex:
+        # Normalize to the Java-like error message
+        raise ValueError("Error generating signature") from ex
     return sig_bytes.hex()
 
 
@@ -332,20 +439,23 @@ def _verify_token_signature(hmac_token: str, secret_hex: str) -> None:
 
 
 def _get_response_hash(input_str: str) -> str:
-    """Compute a SHA-256 over input_str and return encoded hash according to
-    CHALLENGE_HASH_ENCODING.
+    """Compute a SHA-256 over input_str and encode like the Java sample:
+    Base64 of the lowercase hex string.
+
+    Honors CHALLENGE_HASH_ENCODING for backward compatibility, defaulting to
+    base64-hex to match the sample.
     """
     digest = hashlib.sha256(input_str.encode("utf-8")).digest()
     sha_hex = digest.hex()
     enc = CHALLENGE_HASH_ENCODING
-    if enc in ("base64-raw", "raw-base64", "base64"):
-        return base64.b64encode(digest).decode("utf-8")
     if enc in ("base64-hex", "hex-base64"):
         return base64.b64encode(sha_hex.encode("utf-8")).decode("utf-8")
+    if enc in ("base64-raw", "raw-base64", "base64"):
+        return base64.b64encode(digest).decode("utf-8")
     if enc == "hex":
         return sha_hex
-    logging.warning(f"Unknown CHALLENGE_HASH_ENCODING='{CHALLENGE_HASH_ENCODING}', defaulting to base64-raw")
-    return base64.b64encode(digest).decode("utf-8")
+    logging.warning(f"Unknown CHALLENGE_HASH_ENCODING='{CHALLENGE_HASH_ENCODING}', defaulting to base64-hex")
+    return base64.b64encode(sha_hex.encode("utf-8")).decode("utf-8")
 
 # ---------------------------------------------------------------------------
 # Misc helpers
@@ -369,9 +479,9 @@ def _forward_to_event_grid(body: bytes) -> requests.Response:
       - Uses HTTP POST with aeg-sas-key header (legacy path).
     """
     # Prefer Managed Identity / AAD
-    if EVENT_GRID_AUTH == "managed":
+    if EVENT_GRID_AUTH in ("managed", "sp"):
         try:
-            credential = DefaultAzureCredential()
+            credential = _build_credential("eventgrid")
             # For Event Grid Basic, endpoint should be full https URL.
             # For Namespaces, endpoint is hostname without scheme per SDK docs, but SDK accepts both.
             namespace_topic = EVENT_GRID_NAMESPACE_TOPIC or None
@@ -541,11 +651,19 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         # GET: readiness / handshake
         # --------------------
         if req.method and req.method.upper() == "GET":
-            crc = req.params.get("crc")
-            hmac_token = req.params.get("hmac")
+            crc = (req.params.get("crc")
+                   or req.params.get("crcToken")
+                   or req.params.get("challenge")
+                   or req.params.get("token"))
+            hmac_token = (req.params.get("hmac")
+                          or req.params.get("hmacToken")
+                          or req.params.get("signature")
+                          or req.params.get("sig"))
+    
 
             # If both challenge params present, perform verification and respond
             if crc and hmac_token:
+                logging.info(f"Handshake detected. CHALLENGE_HASH_ENCODING='{CHALLENGE_HASH_ENCODING}'")
                 secret_val = _get_hmac_secret()
                 if not secret_val:
                     logging.error("HMAC secret not configured. Set KEY_VAULT_SECRET_URI or HMAC_SECRET env var.")
@@ -594,10 +712,26 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         if not incoming_sig:
             return func.HttpResponse("Missing HMAC signature.", status_code=401)
 
-        computed = _compute_signature(body)
-        if not _constant_time_equals(incoming_sig, computed):
+        verified = False
+        computed: Optional[str] = None
+
+        # Accept either an OSDU token (base64.payload + hex sig) or a raw body HMAC
+        if _looks_like_osdu_token(incoming_sig):
+            # For token validation, the secret is expected to be hex-like per OSDU spec.
+            try:
+                _verify_token_signature(incoming_sig, secret_val)
+                verified = True
+                logging.info("OSDU token signature verified.")
+            except Exception as ex:
+                logging.warning(f"OSDU token verification failed: {ex}")
+        else:
+            computed = _compute_signature(body)
+            if _constant_time_equals(incoming_sig, computed):
+                verified = True
+
+        if not verified:
             logging.warning("HMAC signature mismatch.")
-            logging.warning(f"Computed: {computed}")
+            logging.warning(f"Computed: {computed if computed else '<token expected>'}")
             logging.warning(f"Incoming: {incoming_sig}")
             return func.HttpResponse("Invalid signature.", status_code=401)
 

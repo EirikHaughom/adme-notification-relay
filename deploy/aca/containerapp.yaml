@@ -1,0 +1,72 @@
+#! Sample Azure Container Apps manifest for this project
+# Edit placeholders and deploy with:
+#   az containerapp create --resource-group <rg> --environment <envName> --name <appName> --yaml deploy/aca/containerapp.yaml
+
+type: Microsoft.App/containerApps
+name: osdu-notification-broker
+location: westus
+identity:
+  type: SystemAssigned # Remove or change to UserAssigned if not using MI
+properties:
+  managedEnvironmentId: /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.App/managedEnvironments/<ENV_NAME>
+  configuration:
+    ingress:
+      external: true
+      targetPort: 80
+      transport: auto
+    registries:
+      - server: <ACR_LOGIN_SERVER>
+        username: <ACR_USERNAME>
+        passwordSecretRef: acr-pat
+    secrets:
+      - name: acr-pat
+        value: <ACR_PASSWORD>
+      - name: storage-conn
+        value: <AZURE_STORAGE_CONNECTION_STRING>
+      - name: eventgrid-key
+        value: <EVENT_GRID_KEY>
+  template:
+    containers:
+      - name: api
+        image: <ACR_LOGIN_SERVER>/osdu-notification-broker:latest
+        resources:
+          cpu: 0.5
+          memory: 1Gi
+        env:
+          # Required by Azure Functions runtime
+          - name: FUNCTIONS_WORKER_RUNTIME
+            value: python
+          - name: AzureWebJobsStorage
+            secretRef: storage-conn
+
+          # App configuration
+          - name: EVENT_GRID_ENDPOINT
+            value: https://<TOPIC_OR_NAMESPACE_HOST>/api/events
+          - name: EVENT_GRID_AUTH
+            value: key  # or "managed"
+          - name: EVENT_GRID_KEY
+            secretRef: eventgrid-key
+          - name: EVENT_GRID_NAMESPACE_TOPIC
+            value: "" # set if using Namespace
+          - name: HMAC_SECRET
+            value: <HMAC_SECRET>
+          - name: KEY_VAULT_SECRET_URI
+            value: "" # optionally use Key Vault + managed identity
+          - name: KEY_VAULT_URL
+            value: ""
+          - name: KEY_VAULT_SECRET_NAME
+            value: ""
+          - name: CHALLENGE_HMAC_REQUIRED
+            value: "true"
+          - name: CHALLENGE_HASH_ENCODING
+            value: base64-hex
+          - name: EVENT_TYPE_MODE
+            value: single
+    scale:
+      minReplicas: 0
+      maxReplicas: 5
+      rules:
+        - name: http-concurrency
+          http:
+            metadata:
+              concurrentRequests: "50"

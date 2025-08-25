@@ -1,0 +1,33 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache
+.mypy_cache
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+env/
+
+# VS Code
+.vscode/
+
+# Azure Functions local files
+local.settings.json
+.funcignore
+.funcpack
+
+# Git
+.git/
+.gitignore
+
+# Tests and data not needed in container
+tests/
+
+# OS files
+*.DS_Store
+Thumbs.db
