@@ -111,7 +111,7 @@ Prereqs: Azure CLI, Functions Core Tools, Contributor rights.
 
     ```powershell
     az functionapp create --resource-group $RG --consumption-plan-location $LOC `
-       --name $FUNC --storage-account $STG --runtime python --runtime-version 3.10 --functions-version 4
+       --name $FUNC --storage-account $STG --runtime python --runtime-version 3.12 --functions-version 4
     
     az functionapp identity assign -g $RG -n $FUNC | Out-Null
     $PRINCIPAL = az functionapp identity show -g $RG -n $FUNC --query principalId -o tsv
