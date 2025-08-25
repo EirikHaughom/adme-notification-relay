@@ -34,6 +34,12 @@
     "EVENT_GRID_TENANT_ID": "",
     "EVENT_GRID_CLIENT_ID": "",
     "EVENT_GRID_CLIENT_SECRET": ""
+  ,
+  "LOG_REQUESTS": "true",
+  "LOG_BODY_PREVIEW_LEN": "20000",
+  "EVENT_GRID_RETRIES": "2",
+  "EVENT_GRID_RETRY_BACKOFF": "0.5",
+  "EVENT_GRID_TIMEOUT_SECONDS": "10"
   },
   "ConnectionStrings": {}
 }

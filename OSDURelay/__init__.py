@@ -112,6 +112,23 @@ try:
 except Exception:
     LOG_BODY_PREVIEW_LEN = 20000
 
+# Toggle request logging (headers/body preview)
+LOG_REQUESTS = (os.environ.get("LOG_REQUESTS", "true").lower() == "true")
+
+# Key-auth HTTP retry/backoff config
+try:
+    EVENT_GRID_RETRIES = int(os.environ.get("EVENT_GRID_RETRIES", "2"))
+except Exception:
+    EVENT_GRID_RETRIES = 2
+try:
+    EVENT_GRID_RETRY_BACKOFF = float(os.environ.get("EVENT_GRID_RETRY_BACKOFF", "0.5"))
+except Exception:
+    EVENT_GRID_RETRY_BACKOFF = 0.5
+try:
+    EVENT_GRID_TIMEOUT_SECONDS = float(os.environ.get("EVENT_GRID_TIMEOUT_SECONDS", "10"))
+except Exception:
+    EVENT_GRID_TIMEOUT_SECONDS = 10.0
+
 # Credential and client caches
 _credential_cache: Dict[str, Any] = {}
 _eventgrid_client_cache: Dict[str, EventGridPublisherClient] = {}
@@ -701,9 +718,36 @@ def _forward_to_event_grid(body_or_obj: Any) -> requests.Response:
         data_bytes = body_or_obj.encode("utf-8")
     else:
         data_bytes = bytes(body_or_obj)
-    resp = _requests_session.post(EVENT_GRID_ENDPOINT, data=data_bytes, headers=headers, timeout=10)
-    resp.raise_for_status()
-    return resp
+    attempt = 0
+    backoff = EVENT_GRID_RETRY_BACKOFF
+    last_exc = None
+    while attempt <= EVENT_GRID_RETRIES:
+        try:
+            resp = _requests_session.post(
+                EVENT_GRID_ENDPOINT,
+                data=data_bytes,
+                headers=headers,
+                timeout=EVENT_GRID_TIMEOUT_SECONDS,
+            )
+            # Retry only on 5xx
+            if resp.status_code >= 500:
+                raise requests.HTTPError(f"{resp.status_code} {resp.text}", response=resp)
+            resp.raise_for_status()
+            return resp
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as ex:
+            last_exc = ex
+            attempt += 1
+            if attempt > EVENT_GRID_RETRIES:
+                break
+            try:
+                time.sleep(backoff)
+            except Exception:
+                pass
+            backoff *= 2
+    # If all retries exhausted, rethrow last exception
+    if isinstance(last_exc, requests.HTTPError):
+        raise last_exc
+    raise requests.RequestException(str(last_exc) if last_exc else "Event Grid request failed")
 
 # ---------------------------------------------------------------------------
 # Schema detection & translation: Event Grid vs OSDU DataNotification
@@ -804,13 +848,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         params_dict = dict(req.params) if hasattr(req, "params") else {}
         request_url = getattr(req, "url", "")
 
-        logging.info("Incoming HTTP request:")
-        logging.info(f"    Method: {req.method}")
-        logging.info(f"    URL: {request_url}")
-        logging.info(f"    Headers: {headers_dict}")
-        logging.info(f"    Query Params: {params_dict}")
-        # Limit body logged length to prevent extremely large logs
-        logging.info(f"    Body (first {LOG_BODY_PREVIEW_LEN} chars): {body_text[:LOG_BODY_PREVIEW_LEN]}")
+        if LOG_REQUESTS:
+            logging.info("Incoming HTTP request:")
+            logging.info(f"    Method: {req.method}")
+            logging.info(f"    URL: {request_url}")
+            logging.info(f"    Headers: {headers_dict}")
+            logging.info(f"    Query Params: {params_dict}")
+            # Limit body logged length to prevent extremely large logs
+            logging.info(f"    Body (first {LOG_BODY_PREVIEW_LEN} chars): {body_text[:LOG_BODY_PREVIEW_LEN]}")
 
         # --------------------
         # GET: readiness / handshake
