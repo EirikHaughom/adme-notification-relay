@@ -178,8 +178,8 @@ Note: The tag `main` tracks builds from the repository's main branch.
 ### Option 1: Plain Docker
 
 - Copy `.env.example` to `.env` and fill in values. For local Docker, either:
-   - Use a real storage connection string for `AzureWebJobsStorage`, or
-   - Start Azurite yourself and point `AzureWebJobsStorage` at it.
+  - Use a real storage connection string for `AzureWebJobsStorage`, or
+  - Start Azurite yourself and point `AzureWebJobsStorage` at it.
 
 - Build and run:
 
