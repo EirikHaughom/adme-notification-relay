@@ -4,17 +4,17 @@
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "HMAC_SECRET": "",
-  "KEY_VAULT_URL": "https://<your-vault>.vault.azure.net",
+    "KEY_VAULT_URL": "https://<your-vault>.vault.azure.net",
     "KEY_VAULT_SECRET_NAME": "<secret-name>",
-  "KEY_VAULT_AUTH": "managed",
+    "KEY_VAULT_AUTH": "managed",
     "HMAC_HEADER": "Authorization",
     "HMAC_ALGO": "sha256",
     "SIGNATURE_FORMAT": "hex",
     "SIGNATURE_PREFIX": "hmac ",
     "CHALLENGE_HMAC_REQUIRED": "true",
-  "CHALLENGE_HASH_ENCODING": "base64",
+    "CHALLENGE_HASH_ENCODING": "base64",
     "EVENT_GRID_ENDPOINT": "https://<instance>.<region>-1.eventgrid.azure.net/api/events",
-  "EVENT_GRID_AUTH": "managed",
+    "EVENT_GRID_AUTH": "managed",
     "EVENT_GRID_KEY": "",
     "EVENT_GRID_NAMESPACE_TOPIC": "",
     "EVENT_GRID_CLOUD_SOURCE": "/osdu/relay",
@@ -22,18 +22,18 @@
     "EVENT_TYPE_SINGLE": "osdu.record.changed",
     "EVENT_TYPE_BY_OP_CREATE": "osdu.record.create",
     "EVENT_TYPE_BY_OP_UPDATE": "osdu.record.update",
-  "EVENT_TYPE_BY_OP_DELETE": "osdu.record.delete",
-    
-  "AZURE_TENANT_ID": "",
-  "AZURE_CLIENT_ID": "",
-  "AZURE_CLIENT_SECRET": "",
-    
-  "KEY_VAULT_TENANT_ID": "",
-  "KEY_VAULT_CLIENT_ID": "",
-  "KEY_VAULT_CLIENT_SECRET": "",
-  "EVENT_GRID_TENANT_ID": "",
-  "EVENT_GRID_CLIENT_ID": "",
-  "EVENT_GRID_CLIENT_SECRET": ""
+    "EVENT_TYPE_BY_OP_DELETE": "osdu.record.delete",
+
+    "AZURE_TENANT_ID": "",
+    "AZURE_CLIENT_ID": "",
+    "AZURE_CLIENT_SECRET": "",
+
+    "KEY_VAULT_TENANT_ID": "",
+    "KEY_VAULT_CLIENT_ID": "",
+    "KEY_VAULT_CLIENT_SECRET": "",
+    "EVENT_GRID_TENANT_ID": "",
+    "EVENT_GRID_CLIENT_ID": "",
+    "EVENT_GRID_CLIENT_SECRET": ""
   },
   "ConnectionStrings": {}
 }

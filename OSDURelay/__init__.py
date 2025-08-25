@@ -59,7 +59,8 @@ CHALLENGE_HASH_ENCODING = os.environ.get("CHALLENGE_HASH_ENCODING", "base64-hex"
 #  - Managed Identity / AAD (DefaultAzureCredential). Set EVENT_GRID_AUTH to "managed" (default) and grant Data Sender role.
 #  - Access Key. Set EVENT_GRID_AUTH to "key" and provide EVENT_GRID_KEY.
 #  - Service Principal (Client ID/Secret). Set EVENT_GRID_AUTH to "sp" and provide AZURE_* or EVENT_GRID_* credentials.
-EVENT_GRID_ENDPOINT = os.environ["EVENT_GRID_ENDPOINT"]
+# Use .get here so we can run a friendly validation and fail fast with a clear message
+EVENT_GRID_ENDPOINT = os.environ.get("EVENT_GRID_ENDPOINT", "")
 EVENT_GRID_AUTH = os.environ.get("EVENT_GRID_AUTH", "managed").lower()  # managed | key | sp
 EVENT_GRID_NAMESPACE_TOPIC = os.environ.get("EVENT_GRID_NAMESPACE_TOPIC", "")  # only for Namespaces
 EVENT_GRID_KEY = os.environ.get("EVENT_GRID_KEY", "")
@@ -99,6 +100,106 @@ _cached_hmac_secret: Optional[str] = None
 
 # Default CloudEvent source when publishing via Event Grid Namespace
 EVENT_GRID_CLOUD_SOURCE = os.environ.get("EVENT_GRID_CLOUD_SOURCE", "/osdu/relay")
+
+
+def _validate_configuration() -> None:
+    """Validate mandatory environment variables at startup and raise with a clear, aggregated message.
+
+    Rules:
+    - EVENT_GRID_ENDPOINT is required.
+    - EVENT_GRID_AUTH in {managed,key,sp}.
+      - key: EVENT_GRID_KEY required.
+      - sp: Event Grid SP creds required via EVENT_GRID_CLIENT_ID/SECRET/TENANT_ID or shared AZURE_*.
+    - HMAC secret must be provided via Key Vault (KEY_VAULT_SECRET_URI or KEY_VAULT_URL+KEY_VAULT_SECRET_NAME)
+      or via HMAC_SECRET directly.
+      - If KEY_VAULT_AUTH=sp, Key Vault SP creds via KEY_VAULT_CLIENT_ID/SECRET/TENANT_ID or shared AZURE_*.
+    - If EVENT_GRID_ENDPOINT looks like a Namespace host (no "/api/events"), EVENT_GRID_NAMESPACE_TOPIC is recommended/required.
+    - Azure Functions basics: AzureWebJobsStorage, FUNCTIONS_WORKER_RUNTIME=python (warn if missing in container).
+    - Validate known enums: HMAC_ALGO (sha256), SIGNATURE_FORMAT (hex|base64), CHALLENGE_HASH_ENCODING.
+    """
+    problems = []
+    warnings = []
+
+    def require(name: str, hint: str = "") -> None:
+        if not os.environ.get(name):
+            problems.append(f"{name} is required{f' ({hint})' if hint else ''}.")
+
+    # Core Event Grid
+    if not EVENT_GRID_ENDPOINT:
+        problems.append("EVENT_GRID_ENDPOINT is required (e.g., https://<topic>.<region>-1.eventgrid.azure.net/api/events or <namespace>.<region>-1.eventgrid.azure.net).")
+
+    auth = (EVENT_GRID_AUTH or "").lower()
+    if auth not in ("managed", "key", "sp"):
+        problems.append("EVENT_GRID_AUTH must be one of: managed, key, sp.")
+    else:
+        if auth == "key":
+            require("EVENT_GRID_KEY", "required when EVENT_GRID_AUTH=key")
+        if auth == "sp":
+            # Require either specific EVENT_GRID_* creds or shared AZURE_* creds
+            eg_tenant = os.environ.get("EVENT_GRID_TENANT_ID") or os.environ.get("AZURE_TENANT_ID")
+            eg_client = os.environ.get("EVENT_GRID_CLIENT_ID") or os.environ.get("AZURE_CLIENT_ID")
+            eg_secret = os.environ.get("EVENT_GRID_CLIENT_SECRET") or os.environ.get("AZURE_CLIENT_SECRET")
+            if not (eg_tenant and eg_client and eg_secret):
+                problems.append("EVENT_GRID_AUTH=sp requires EVENT_GRID_TENANT_ID/EVENT_GRID_CLIENT_ID/EVENT_GRID_CLIENT_SECRET or AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET.")
+
+    # Namespace topic hint: If endpoint doesn't include '/api/events', treat as Namespace host and require topic
+    if EVENT_GRID_ENDPOINT and "/api/events" not in EVENT_GRID_ENDPOINT:
+        if not os.environ.get("EVENT_GRID_NAMESPACE_TOPIC"):
+            # The SDK can accept CloudEvents without explicit topic in some cases, but in practice a topic is needed
+            warnings.append("EVENT_GRID_NAMESPACE_TOPIC not set. For Event Grid Namespaces, set this to your Namespace Topic name.")
+
+    # HMAC secret via Key Vault or env var
+    has_hmac_env = bool(os.environ.get("HMAC_SECRET"))
+    has_kv_uri = bool(os.environ.get("KEY_VAULT_SECRET_URI"))
+    has_kv_pair = bool(os.environ.get("KEY_VAULT_URL") and os.environ.get("KEY_VAULT_SECRET_NAME"))
+    if not (has_hmac_env or has_kv_uri or has_kv_pair):
+        problems.append("Provide HMAC secret via KEY_VAULT_SECRET_URI or KEY_VAULT_URL+KEY_VAULT_SECRET_NAME, or set HMAC_SECRET for local/dev.")
+
+    kv_auth = (os.environ.get("KEY_VAULT_AUTH", "managed") or "managed").lower()
+    if (has_kv_uri or has_kv_pair) and kv_auth not in ("managed", "sp"):
+        problems.append("KEY_VAULT_AUTH must be 'managed' or 'sp' when using Key Vault.")
+    if (has_kv_uri or has_kv_pair) and kv_auth == "sp":
+        kv_tenant = os.environ.get("KEY_VAULT_TENANT_ID") or os.environ.get("AZURE_TENANT_ID")
+        kv_client = os.environ.get("KEY_VAULT_CLIENT_ID") or os.environ.get("AZURE_CLIENT_ID")
+        kv_secret = os.environ.get("KEY_VAULT_CLIENT_SECRET") or os.environ.get("AZURE_CLIENT_SECRET")
+        if not (kv_tenant and kv_client and kv_secret):
+            problems.append("KEY_VAULT_AUTH=sp requires KEY_VAULT_TENANT_ID/KEY_VAULT_CLIENT_ID/KEY_VAULT_CLIENT_SECRET or shared AZURE_* variables.")
+
+    # Function runtime basics (these may be injected by the platform; treat missing as warnings for containers)
+    if not os.environ.get("AzureWebJobsStorage"):
+        warnings.append("AzureWebJobsStorage not set. Required by Azure Functions; use UseDevelopmentStorage=true for local dev.")
+    if (os.environ.get("FUNCTIONS_WORKER_RUNTIME", "").lower() or "") != "python":
+        warnings.append("FUNCTIONS_WORKER_RUNTIME should be 'python'.")
+
+    # Enum validations
+    if (os.environ.get("HMAC_ALGO", "sha256").lower()) != "sha256":
+        problems.append("HMAC_ALGO must be 'sha256'.")
+    if os.environ.get("SIGNATURE_FORMAT", "hex").lower() not in ("hex", "base64"):
+        problems.append("SIGNATURE_FORMAT must be 'hex' or 'base64'.")
+    if os.environ.get("CHALLENGE_HASH_ENCODING", "base64-hex").lower() not in ("base64-hex", "hex", "base64", "base64-raw", "raw-base64", "hex-base64"):
+        problems.append("CHALLENGE_HASH_ENCODING must be one of: base64-hex, hex, base64, base64-raw.")
+
+    # Report and fail fast if problems found
+    if problems:
+        msg_lines = [
+            "Configuration error(s) detected:",
+            *[f" - {p}" for p in problems],
+        ]
+        if warnings:
+            msg_lines.append("Warnings:")
+            msg_lines.extend([f" - {w}" for w in warnings])
+        full_msg = "\n".join(msg_lines)
+        # Log clearly, then raise to stop the app from starting improperly
+        logging.error(full_msg)
+        raise RuntimeError(full_msg)
+
+    # Log warnings but do not block startup
+    for w in warnings:
+        logging.warning(w)
+
+
+# Run validation on import so misconfiguration is reported immediately when the container/function starts
+_validate_configuration()
 
 
 def _build_credential(service: str = ""):
