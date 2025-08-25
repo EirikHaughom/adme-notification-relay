@@ -106,6 +106,16 @@ _HEX_RE = re.compile(r"[A-Fa-f0-9]+")
 _ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
 _requests_session = requests.Session()
 
+# Configurable request body preview length for logs
+try:
+    LOG_BODY_PREVIEW_LEN = int(os.environ.get("LOG_BODY_PREVIEW_LEN", "20000"))
+except Exception:
+    LOG_BODY_PREVIEW_LEN = 20000
+
+# Credential and client caches
+_credential_cache: Dict[str, Any] = {}
+_eventgrid_client_cache: Dict[str, EventGridPublisherClient] = {}
+
 
 def _validate_configuration() -> None:
     """Validate mandatory environment variables at startup and raise with a clear, aggregated message.
@@ -215,6 +225,31 @@ def _build_credential(service: str = ""):
     """
     svc = (service or "").lower()
 
+    # Cache key uses service and auth mode with client id (if present)
+    cache_key = None
+    try:
+        if svc == "keyvault":
+            mode = KEY_VAULT_AUTH
+            if mode == "sp":
+                cid = KEY_VAULT_CLIENT_ID or AZURE_CLIENT_ID
+                cache_key = f"kv:sp:{cid}"
+            else:
+                cache_key = "kv:managed"
+        elif svc == "eventgrid":
+            mode = EVENT_GRID_AUTH
+            if mode == "sp":
+                cid = EVENT_GRID_CLIENT_ID or AZURE_CLIENT_ID
+                cache_key = f"eg:sp:{cid}"
+            else:
+                cache_key = f"eg:{mode}"
+        else:
+            cache_key = f"def:{svc}"
+        if cache_key and cache_key in _credential_cache:
+            return _credential_cache[cache_key]
+    except Exception:
+        # If any env combination fails for cache key, fall through to direct creation
+        cache_key = None
+
     if svc == "keyvault":
         mode = KEY_VAULT_AUTH
         if mode == "sp":
@@ -223,9 +258,12 @@ def _build_credential(service: str = ""):
             secret = KEY_VAULT_CLIENT_SECRET or AZURE_CLIENT_SECRET
             if not (tenant and client and secret):
                 raise ValueError("KEY_VAULT_AUTH=sp but client credentials are missing (set KEY_VAULT_* or AZURE_* vars)")
-            return ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=secret)
-        # default
-        return DefaultAzureCredential()
+            cred = ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=secret)
+        else:
+            cred = DefaultAzureCredential()
+        if cache_key:
+            _credential_cache[cache_key] = cred
+        return cred
 
     if svc == "eventgrid":
         mode = EVENT_GRID_AUTH
@@ -235,12 +273,19 @@ def _build_credential(service: str = ""):
             secret = EVENT_GRID_CLIENT_SECRET or AZURE_CLIENT_SECRET
             if not (tenant and client and secret):
                 raise ValueError("EVENT_GRID_AUTH=sp but client credentials are missing (set EVENT_GRID_* or AZURE_* vars)")
-            return ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=secret)
-        # managed path
-        return DefaultAzureCredential()
+            cred = ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=secret)
+        else:
+            # managed path
+            cred = DefaultAzureCredential()
+        if cache_key:
+            _credential_cache[cache_key] = cred
+        return cred
 
     # Fallback
-    return DefaultAzureCredential()
+    cred = DefaultAzureCredential()
+    if cache_key:
+        _credential_cache[cache_key] = cred
+    return cred
 
 
 def _fetch_secret_from_keyvault() -> Optional[str]:
@@ -591,11 +636,15 @@ def _forward_to_event_grid(body_or_obj: Any) -> requests.Response:
             # For Event Grid Basic, endpoint should be full https URL.
             # For Namespaces, endpoint is hostname without scheme per SDK docs, but SDK accepts both.
             namespace_topic = EVENT_GRID_NAMESPACE_TOPIC or None
-            client = EventGridPublisherClient(
-                EVENT_GRID_ENDPOINT,
-                credential,
-                namespace_topic=namespace_topic,
-            )
+            client_key = f"{EVENT_GRID_ENDPOINT}|{namespace_topic}|{EVENT_GRID_AUTH}"
+            client = _eventgrid_client_cache.get(client_key)
+            if client is None:
+                client = EventGridPublisherClient(
+                    EVENT_GRID_ENDPOINT,
+                    credential,
+                    namespace_topic=namespace_topic,
+                )
+                _eventgrid_client_cache[client_key] = client
             # The SDK expects Python objects (dict/list) not raw bytes; parse only if needed
             if isinstance(body_or_obj, (dict, list)):
                 payload = body_or_obj
@@ -746,7 +795,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         # Log incoming request details for debugging (method, url, headers, params, body)
         try:
             raw_body = req.get_body() or b""
-            body_text = (raw_body[:20000]).decode("utf-8", errors="replace")
+            body_text = (raw_body[:LOG_BODY_PREVIEW_LEN]).decode("utf-8", errors="replace")
         except Exception as ex:
             raw_body = b""
             body_text = f"<<unreadable body: {ex}>>"
@@ -761,7 +810,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         logging.info(f"    Headers: {headers_dict}")
         logging.info(f"    Query Params: {params_dict}")
         # Limit body logged length to prevent extremely large logs
-        logging.info(f"    Body (first 20k chars): {body_text[:20000]}")
+        logging.info(f"    Body (first {LOG_BODY_PREVIEW_LEN} chars): {body_text[:LOG_BODY_PREVIEW_LEN]}")
 
         # --------------------
         # GET: readiness / handshake
@@ -775,7 +824,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
                           or req.params.get("hmacToken")
                           or req.params.get("signature")
                           or req.params.get("sig"))
-    
 
             # If both challenge params present, perform verification and respond
             if crc and hmac_token:
