@@ -10,6 +10,10 @@ Endpoint: `GET/POST /api/osdu-relay`
 
 Key files: `OSDURelay/` (function), `deploy/aca/containerapp.yaml` (ACA sample), `tests/` (local helpers).
 
+## Workflow
+
+![ADME Notification Relay Workflow Schematic](./assets/admerelay.jpg)
+
 ## Table of Contents
 
 - [Mandatory configuration (app settings / env vars)](#mandatory-configuration-app-settings--env-vars)
