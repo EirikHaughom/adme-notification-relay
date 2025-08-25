@@ -17,7 +17,7 @@ Key files: `OSDURelay/` (function), `deploy/aca/containerapp.yaml` (ACA sample),
 ## Table of Contents
 
 - [Mandatory configuration (app settings / env vars)](#mandatory-configuration-app-settings--env-vars)
-    - [Startup validation](#startup-validation)
+  - [Startup validation](#startup-validation)
 - [Deploy as Azure Function (Managed Identity)](#deploy-as-azure-function-managed-identity)
 - [Deploy as Azure Container App (Managed Identity)](#deploy-as-azure-container-app-managed-identity)
 - [Local testing (optional)](#local-testing-optional)
