@@ -153,65 +153,65 @@ Prereqs: Azure CLI, an image registry (e.g., ACR).
 
 1. Variables
 
-```powershell
-$SUB="<subscriptionId>"
-$RG="osdu-relay-rg"
-$LOC="westeurope"
-$ACA_ENV="osdu-relay-env"
-$APP="osdu-relay-aca"
-$ACR="osdurelayacr$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-$IMG="osdu-relay:latest"
-$STG="osdurelaystg$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-$KV="osdurelay-kv"
-$EG_TOPIC="osdu-eg-topic"
-```
+    ```powershell
+    $SUB="<subscriptionId>"
+    $RG="osdu-relay-rg"
+    $LOC="westeurope"
+    $ACA_ENV="osdu-relay-env"
+    $APP="osdu-relay-aca"
+    $ACR="osdurelayacr$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
+    $IMG="osdu-relay:latest"
+    $STG="osdurelaystg$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
+    $KV="osdurelay-kv"
+    $EG_TOPIC="osdu-eg-topic"
+    ```
 
 1. Login and resource group
 
-```powershell
-az login
-az account set --subscription $SUB
-az group create -n $RG -l $LOC
-```
+    ```powershell
+    az login
+    az account set --subscription $SUB
+    az group create -n $RG -l $LOC
+    ```
 
 1. Registry, image, storage, Key Vault, Event Grid
 
-```powershell
-az acr create -n $ACR -g $RG -l $LOC --sku Basic
-az acr login -n $ACR
-
-az storage account create -n $STG -g $RG -l $LOC --sku Standard_LRS
-$STG_CONN = az storage account show-connection-string -n $STG -g $RG --query connectionString -o tsv
-
-az keyvault create -n $KV -g $RG -l $LOC
-az keyvault secret set --vault-name $KV --name HmacSecret --value "<REPLACE_WITH_SECRET>"
-
-az eventgrid topic create -n $EG_TOPIC -g $RG -l $LOC
-$EG_ENDPOINT = "https://$EG_TOPIC.$LOC-1.eventgrid.azure.net/api/events"
-
-# Build and push image
-az acr build -r $ACR -t $IMG .
-```
+    ```powershell
+    az acr create -n $ACR -g $RG -l $LOC --sku Basic
+    az acr login -n $ACR
+    
+    az storage account create -n $STG -g $RG -l $LOC --sku Standard_LRS
+    $STG_CONN = az storage account show-connection-string -n $STG -g $RG --query connectionString -o tsv
+    
+    az keyvault create -n $KV -g $RG -l $LOC
+    az keyvault secret set --vault-name $KV --name HmacSecret --value "<REPLACE_WITH_SECRET>"
+    
+    az eventgrid topic create -n $EG_TOPIC -g $RG -l $LOC
+    $EG_ENDPOINT = "https://$EG_TOPIC.$LOC-1.eventgrid.azure.net/api/events"
+    
+    # Build and push image
+    az acr build -r $ACR -t $IMG .
+    ```
 
 1. Container Apps environment and app
 
-```powershell
-az containerapp env create -g $RG -n $ACA_ENV -l $LOC
-
-az containerapp create -g $RG -n $APP --environment $ACA_ENV `
-   --image "$(az acr show -n $ACR --query loginServer -o tsv)/$IMG" `
-   --registry-server $(az acr show -n $ACR --query loginServer -o tsv) `
-   --ingress external --target-port 80 `
-   --system-assigned `
-   --secrets storage-conn="$STG_CONN" `
-   --env-vars `
-      AzureWebJobsStorage=secretref:storage-conn `
-      FUNCTIONS_WORKER_RUNTIME=python `
-      EVENT_GRID_ENDPOINT=$EG_ENDPOINT `
-      EVENT_GRID_AUTH=managed `
-      KEY_VAULT_URL=https://$KV.vault.azure.net `
-      KEY_VAULT_SECRET_NAME=HmacSecret
-```
+    ```powershell
+    az containerapp env create -g $RG -n $ACA_ENV -l $LOC
+    
+    az containerapp create -g $RG -n $APP --environment $ACA_ENV `
+       --image "$(az acr show -n $ACR --query loginServer -o tsv)/$IMG" `
+       --registry-server $(az acr show -n $ACR --query loginServer -o tsv) `
+       --ingress external --target-port 80 `
+       --system-assigned `
+       --secrets storage-conn="$STG_CONN" `
+       --env-vars `
+          AzureWebJobsStorage=secretref:storage-conn `
+          FUNCTIONS_WORKER_RUNTIME=python `
+          EVENT_GRID_ENDPOINT=$EG_ENDPOINT `
+          EVENT_GRID_AUTH=managed `
+          KEY_VAULT_URL=https://$KV.vault.azure.net `
+          KEY_VAULT_SECRET_NAME=HmacSecret
+    ```
 
 1. Grant access (Managed Identity)
 
