@@ -101,6 +101,11 @@ _cached_hmac_secret: Optional[str] = None
 # Default CloudEvent source when publishing via Event Grid Namespace
 EVENT_GRID_CLOUD_SOURCE = os.environ.get("EVENT_GRID_CLOUD_SOURCE", "/osdu/relay")
 
+# Precompiled regexes and shared HTTP session (micro-optimizations on hot paths)
+_HEX_RE = re.compile(r"[A-Fa-f0-9]+")
+_ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
+_requests_session = requests.Session()
+
 
 def _validate_configuration() -> None:
     """Validate mandatory environment variables at startup and raise with a clear, aggregated message.
@@ -413,7 +418,7 @@ def _hex_to_bytes(s: Optional[str]) -> bytes:
     if val.startswith(("0x", "0X")):
         val = val[2:]
     # If it looks like hex, try converting
-    if re.fullmatch(r"[A-Fa-f0-9]+", val):
+    if _HEX_RE.fullmatch(val):
         if len(val) % 2 == 1:
             val = "0" + val  # pad odd-length hex
         try:
@@ -437,7 +442,7 @@ def _strict_hex_to_bytes(s: Optional[str]) -> bytes:
     val = str(s).strip()
     if val.startswith(("0x", "0X")):
         val = val[2:]
-    if not re.fullmatch(r"[A-Fa-f0-9]+", val or "") or len(val) % 2 != 0:
+    if not _HEX_RE.fullmatch(val or "") or len(val) % 2 != 0:
         raise ValueError("Error generating signature")
     try:
         return bytes.fromhex(val)
@@ -565,11 +570,11 @@ def _get_response_hash(input_str: str) -> str:
 
 def _is_valid_hex_like_secret(s: Optional[str]) -> bool:
     """Simple check: non-empty alphanumeric (hex-like), even length."""
-    return bool(s) and bool(re.fullmatch(r"[A-Za-z0-9]+", s)) and len(s) % 2 == 0
+    return bool(s) and bool(_ALNUM_RE.fullmatch(str(s))) and len(str(s)) % 2 == 0
 
 
 
-def _forward_to_event_grid(body: bytes) -> requests.Response:
+def _forward_to_event_grid(body_or_obj: Any) -> requests.Response:
     """Publish payload to Event Grid using Managed Identity (AAD) when configured, else fallback to Access Key.
 
     When EVENT_GRID_AUTH == "managed":
@@ -591,8 +596,15 @@ def _forward_to_event_grid(body: bytes) -> requests.Response:
                 credential,
                 namespace_topic=namespace_topic,
             )
-            # The SDK expects Python objects (dict/list) not raw bytes; parse once
-            payload = json.loads(body.decode("utf-8"))
+            # The SDK expects Python objects (dict/list) not raw bytes; parse only if needed
+            if isinstance(body_or_obj, (dict, list)):
+                payload = body_or_obj
+            elif isinstance(body_or_obj, (bytes, bytearray)):
+                payload = json.loads(bytes(body_or_obj).decode("utf-8"))
+            elif isinstance(body_or_obj, str):
+                payload = json.loads(body_or_obj)
+            else:
+                payload = json.loads(json.dumps(body_or_obj))
             # If targeting Namespace, ensure CloudEvent schema
             if namespace_topic and isinstance(payload, list):
                 def to_cloudevent(ev: Dict[str, Any]) -> Dict[str, Any]:
@@ -633,7 +645,14 @@ def _forward_to_event_grid(body: bytes) -> requests.Response:
         "Content-Type": "application/json; charset=utf-8",
         "aeg-sas-key": EVENT_GRID_KEY,
     }
-    resp = requests.post(EVENT_GRID_ENDPOINT, data=body, headers=headers, timeout=10)
+    # Ensure bytes for HTTP
+    if isinstance(body_or_obj, (dict, list)):
+        data_bytes = json.dumps(body_or_obj).encode("utf-8")
+    elif isinstance(body_or_obj, str):
+        data_bytes = body_or_obj.encode("utf-8")
+    else:
+        data_bytes = bytes(body_or_obj)
+    resp = _requests_session.post(EVENT_GRID_ENDPOINT, data=data_bytes, headers=headers, timeout=10)
     resp.raise_for_status()
     return resp
 
@@ -727,11 +746,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         # Log incoming request details for debugging (method, url, headers, params, body)
         try:
             raw_body = req.get_body() or b""
-            try:
-                body_text = raw_body.decode("utf-8")
-            except Exception:
-                # Fallback to replace so logging never fails on binary content
-                body_text = raw_body.decode("utf-8", errors="replace")
+            body_text = (raw_body[:20000]).decode("utf-8", errors="replace")
         except Exception as ex:
             raw_body = b""
             body_text = f"<<unreadable body: {ex}>>"
@@ -802,7 +817,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
         # --------------------
         # POST: verify HMAC signature then forward (possibly translating payload)
         # --------------------
-        body = req.get_body() or b""
+        body = raw_body
         incoming_sig = _extract_incoming_signature(req)
 
         secret_val = _get_hmac_secret()
@@ -838,21 +853,27 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
 
         # Signature OK -> attempt to detect/translate schema
         translated_body = body
+        translated_obj: Any = None
         try:
             payload = json.loads(body.decode("utf-8-sig"))
             if isinstance(payload, list):
                 if _is_eventgrid_batch(payload):
                     translated_body = body  # already Event Grid schema
+                    translated_obj = payload
                 elif _is_osdu_data_notification(payload):
                     logging.info("Translating OSDU DataNotification payload to Event Grid schema.")
                     eg_events = _translate_osdu_to_eventgrid(payload)
                     translated_body = json.dumps(eg_events).encode("utf-8")
+                    translated_obj = eg_events
                 else:
                     logging.info("Unknown list payload schema; forwarding as-is.")
+                    translated_obj = payload
             else:
                 logging.info("Non-list payload; forwarding as-is.")
+                translated_obj = payload
         except Exception as ex:
             logging.warning(f"Failed to parse JSON payload for translation: {ex}; forwarding as-is.")
+            translated_obj = None
 
         # Optional dry-run: return the translated payload without forwarding
         dry_run = (req.params.get("dryRun", "0") or "0").lower() in ("1", "true", "yes")
@@ -860,7 +881,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:  # pragma: no cover - exer
             return func.HttpResponse(body=translated_body, status_code=200, mimetype="application/json")
 
         # Forward to Event Grid
-        eg_resp = _forward_to_event_grid(translated_body)
+        eg_resp = _forward_to_event_grid(translated_obj if translated_obj is not None else translated_body)
         return func.HttpResponse(f"Forwarded to Event Grid: {eg_resp.status_code}", status_code=200)
 
     except requests.HTTPError as http_err:
